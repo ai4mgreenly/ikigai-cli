@@ -1,0 +1,231 @@
+// Package agent drives a single ikigai-cli iteration: it issues one
+// streaming request to a provider.Client, forwards the model's turn to
+// the wire layer, and terminates the iteration with a single result
+// event.
+//
+// R-VJBZ-S578: an iteration terminates with exactly one `result` event
+// whose `structured_output` satisfies the JSON schema supplied via
+// `--json-schema`.
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/ai4mgreenly/ikigai-cli/internal/provider"
+	"github.com/ai4mgreenly/ikigai-cli/internal/schema"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools"
+	"github.com/ai4mgreenly/ikigai-cli/internal/trace"
+	"github.com/ai4mgreenly/ikigai-cli/internal/wire"
+)
+
+// maxStructuredAttempts caps how many times Run will issue the model
+// when each attempt's structured_output fails to parse or fails schema
+// validation. R-WFWM-BKWX: when the model does not produce
+// schema-conforming output, the agent retries up to a bounded number of
+// times before surfacing an iteration error.
+const maxStructuredAttempts = 3
+
+// Run executes one iteration. It calls client.Stream, emits an
+// assistant event for the turn, and on a non-tool stop reason emits a
+// result event whose structured_output is parsed from the assistant's
+// final text and validated against sch.
+//
+// R-8293-8LCI: when the assistant stops with "tool_use", Run dispatches
+// every tool_use block through internal/tools.Dispatch, emits a user
+// event with the results, appends both turns to req.Messages, and
+// re-invokes the provider. The tool-dispatch cycle repeats until the
+// model returns a non-tool stop reason.
+//
+// R-WFWM-BKWX: delivering schema-conforming structured_output is
+// ikigai-cli's responsibility. If the assistant's text fails to parse
+// as JSON or fails to validate against sch, Run retries the model up
+// to maxStructuredAttempts times before emitting an iteration error.
+// Each attempt emits its own assistant event so the operator's
+// transcript records the failed turns.
+//
+// The session must be fresh (no prior events). On any error — provider
+// failure, malformed structured_output exhausting all attempts, or
+// schema-validation failure exhausting all attempts — Run still emits
+// exactly one result event, with is_error=true and a transport-free
+// message in structured_output.
+// Run executes one iteration. tracer may be nil; when non-nil it
+// receives trace events for every tool dispatch.
+func Run(ctx context.Context, client provider.Client, sess *wire.Session, req provider.Request, sch *schema.Schema, tracer *trace.Tracer) error {
+	var lastErr error
+	attempt := 0
+	for {
+		events, err := client.Stream(ctx, req)
+		if err != nil {
+			return emitIterationError(sess, err.Error())
+		}
+
+		wireBlocks, providerBlocks, text, stop := drainTurn(events)
+
+		if err := sess.EmitAssistant(wire.NewAssistantEvent(wireBlocks...)); err != nil {
+			return err
+		}
+
+		if stop == "tool_use" {
+			// R-8293-8LCI: dispatch tools and loop back.
+			req, err = dispatchTools(ctx, sess, req, wireBlocks, providerBlocks, tracer)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
+		attempt++
+		value, perr := parseAndValidate(text, sch)
+		if perr == nil {
+			ev, err := wire.NewResultEvent(value, false)
+			if err != nil {
+				return emitIterationError(sess, fmt.Sprintf("structured_output marshal: %v", err))
+			}
+			return sess.EmitResult(ev)
+		}
+		lastErr = perr
+
+		if attempt >= maxStructuredAttempts {
+			return emitIterationError(sess, fmt.Sprintf("structured_output failed after %d attempts: %v", maxStructuredAttempts, lastErr))
+		}
+	}
+}
+
+// dispatchTools dispatches every tool_use block in wireBlocks, emits the
+// corresponding tool_result user event via sess, and returns a new Request
+// with the assistant turn and tool-result user turn appended to history.
+// R-8293-8LCI.
+func dispatchTools(ctx context.Context, sess *wire.Session, req provider.Request, wireBlocks []any, providerBlocks []provider.Block, tracer *trace.Tracer) (provider.Request, error) {
+	var resultWireBlocks []any
+	var resultProviderBlocks []provider.Block
+
+	for _, b := range wireBlocks {
+		tu, ok := b.(wire.ToolUseBlock)
+		if !ok {
+			continue
+		}
+		// R-6EFF-GW25: trace tool dispatch before execution.
+		tracer.LogToolDispatch(tu.Name, tu.Input)
+		trWire, err := tools.Dispatch(ctx, tu)
+		if err != nil {
+			// Dispatch returns an is_error block on failure; a Go error here
+			// means NewToolResultBlock itself failed, which should never happen.
+			return provider.Request{}, fmt.Errorf("dispatch %s: %w", tu.Name, err)
+		}
+		resultWireBlocks = append(resultWireBlocks, trWire)
+
+		// Unmarshal the wire content (JSON-encoded string) to obtain the
+		// plain string that provider.ToolResultBlock.Content expects.
+		var contentStr string
+		if err := json.Unmarshal(trWire.Content, &contentStr); err != nil {
+			// Fallback: use the raw JSON as the content string.
+			contentStr = string(trWire.Content)
+		}
+		// R-6EFF-GW25: trace tool result after execution.
+		tracer.LogToolResult(tu.Name, trWire.IsError, contentStr)
+		resultProviderBlocks = append(resultProviderBlocks, provider.ToolResultBlock{
+			ToolUseID: trWire.ToolUseID,
+			Content:   contentStr,
+			IsError:   trWire.IsError,
+		})
+	}
+
+	if err := sess.EmitUser(wire.NewUserEvent(resultWireBlocks...)); err != nil {
+		return provider.Request{}, err
+	}
+
+	// Clone the message history and append the assistant turn (preserving
+	// thinking blocks per R-ROBI-V64M) and the tool-result user turn.
+	newMsgs := make([]provider.Message, len(req.Messages), len(req.Messages)+2)
+	copy(newMsgs, req.Messages)
+	newMsgs = append(newMsgs,
+		provider.Message{Role: provider.RoleAssistant, Blocks: provider.CloneBlocks(providerBlocks)},
+		provider.Message{Role: provider.RoleUser, Blocks: resultProviderBlocks},
+	)
+	newReq := req
+	newReq.Messages = newMsgs
+	return newReq, nil
+}
+
+// drainTurn reads the provider event channel until close and returns
+// (1) the wire blocks for stream emission, (2) the provider blocks for
+// history append (preserving signatures per R-ROBI-V64M), (3) the
+// concatenated assistant text, and (4) the observed stop reason.
+func drainTurn(events <-chan provider.Event) (wireBlocks []any, providerBlocks []provider.Block, text string, stop string) {
+	var textBuf strings.Builder
+	var allText strings.Builder
+	flushText := func() {
+		if textBuf.Len() == 0 {
+			return
+		}
+		t := textBuf.String()
+		wireBlocks = append(wireBlocks, wire.NewTextBlock(t))
+		providerBlocks = append(providerBlocks, provider.TextBlock{Text: t})
+		textBuf.Reset()
+	}
+	for ev := range events {
+		switch e := ev.(type) {
+		case provider.EventTextDelta:
+			textBuf.WriteString(e.Text)
+			allText.WriteString(e.Text)
+		case provider.EventThinking:
+			flushText()
+			wireBlocks = append(wireBlocks, wire.NewThinkingBlock(e.Text))
+			providerBlocks = append(providerBlocks, provider.ThinkingBlock{Text: e.Text, Signature: e.Signature})
+		case provider.EventToolUse:
+			flushText()
+			wireBlocks = append(wireBlocks, wire.ToolUseBlock{
+				Type:  "tool_use",
+				ID:    e.ID,
+				Name:  e.Name,
+				Input: e.Input,
+			})
+			providerBlocks = append(providerBlocks, provider.ToolUseBlock{
+				ID:    e.ID,
+				Name:  e.Name,
+				Input: e.Input,
+			})
+		case provider.EventDone:
+			stop = e.StopReason
+		case provider.EventUsage:
+			// usage totals are not part of the v1 wire surface.
+		}
+	}
+	flushText()
+	text = allText.String()
+	return
+}
+
+// parseAndValidate parses text as JSON and validates the result
+// against sch. It returns the decoded value or a transport-free error
+// describing why the text is not acceptable structured_output.
+func parseAndValidate(text string, sch *schema.Schema) (any, error) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty assistant text; no structured_output to extract")
+	}
+	var value any
+	if err := json.Unmarshal([]byte(trimmed), &value); err != nil {
+		return nil, fmt.Errorf("parse: %v", err)
+	}
+	if sch != nil {
+		if err := sch.Validate(value); err != nil {
+			return nil, fmt.Errorf("schema: %v", err)
+		}
+	}
+	return value, nil
+}
+
+// emitIterationError writes a result event carrying msg as the
+// structured_output with is_error=true. R-E2W7-K5JB: msg is expected
+// to already be transport-free.
+func emitIterationError(sess *wire.Session, msg string) error {
+	ev, err := wire.NewResultEvent(map[string]string{"error": msg}, true)
+	if err != nil {
+		return err
+	}
+	return sess.EmitResult(ev)
+}
