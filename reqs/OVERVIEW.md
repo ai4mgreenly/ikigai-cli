@@ -150,8 +150,9 @@ are explicitly not part of the target audience.
     repo (typical: `./bin/ikigai-cli`).
   - `test`: runs the project's automated test suite and exits
     non-zero on any failure.
-  - `install`: places the built binary on the user's `PATH` at a
-    standard location (typical: `$GOBIN` or `$GOPATH/bin`).
+  - `install`: places the built binary at `~/.local/bin/ikigai-cli`,
+    creating the directory if it does not exist. Users are
+    expected to have `~/.local/bin` on their `PATH`.
   - `clean`: removes build artifacts produced by `build`.
   Targets are independent — `test` and `install` may depend on
   `build`, but `clean` must not depend on a build step.
