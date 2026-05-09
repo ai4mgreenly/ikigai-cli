@@ -1,12 +1,13 @@
-# Google Generative Language API — implementation reference
+# Google Generative Language API — implementation reference (v2 design context)
 
 This is implementation-grade reference data for the Google
 Generative Language API (`generativelanguage.googleapis.com`)
-surface ikigai-cli will call directly over HTTPS. The high-level
-requirements (which models to support, effort vocabulary, auth
-conventions, etc.) live in `../providers.md`. This file pins the
-wire-level shapes the build agent needs to construct requests and
-parse responses.
+surface a v2 ikigai-cli would call directly over HTTPS. **It is
+design context, not part of the MVP spec.** The high-level v2
+design notes (which models to support, effort vocabulary, auth
+conventions, etc.) live in `overview.md`. This file pins the wire-
+level shapes a future build agent would need to construct requests
+and parse responses.
 
 ikigai-cli uses the **Generative Language API**, NOT Vertex AI.
 Verified against `ai.google.dev` docs as of 2026-05-08.

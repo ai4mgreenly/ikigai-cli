@@ -1,11 +1,12 @@
-# OpenAI Responses API — implementation reference
+# OpenAI Responses API — implementation reference (v2 design context)
 
 This is implementation-grade reference data for the OpenAI
-Responses API surface ikigai-cli will call directly over HTTPS. The
-high-level requirements (which models to support, effort vocabulary,
-auth conventions, etc.) live in `../providers.md`. This file pins
-the wire-level shapes the build agent needs to construct requests
-and parse responses.
+Responses API surface a v2 ikigai-cli would call directly over
+HTTPS. **It is design context, not part of the MVP spec.** The
+high-level v2 design notes (which models to support, effort
+vocabulary, auth conventions, etc.) live in `overview.md`. This
+file pins the wire-level shapes a future build agent would need to
+construct requests and parse responses.
 
 ikigai-cli uses the **Responses API**, not Chat Completions.
 Verified against `developers.openai.com` and `platform.openai.com`

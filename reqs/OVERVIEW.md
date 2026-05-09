@@ -70,10 +70,119 @@ are explicitly not part of the target audience.
   `{"status":"DONE"|"CONTINUE"}`, but the binary must honor whatever
   schema is provided.
 
+- R-A351-VO9A: ikigai-cli processes stdin event-by-event and MUST
+  NOT wait for stdin EOF before dispatching the agent loop. As
+  soon as one complete `user` stream-json event has been parsed
+  off stdin, ikigai-cli initiates the provider round-trip with
+  that user message as the prompt; subsequent stream-json events
+  (none, in ralph-loops' current usage) are handled in the same
+  event-driven manner. The iteration terminates by writing the
+  single `result` event to stdout per R-VJBZ-S578 — at no point
+  is stdin EOF a precondition for emitting that result. ralph-
+  loops keeps stdin open against `claude` today and `claude`
+  responds without waiting for EOF; the drop-in invariant
+  (R-YARD-835I) requires ikigai-cli to behave identically.
+  Buffering stdin to EOF before invoking the provider deadlocks
+  the iteration: ralph-loops will not close its end of the pipe
+  until it has read ikigai-cli's result, and ikigai-cli will not
+  emit that result until its read of stdin returns EOF. This
+  failure mode is silent (no HTTP traffic, no `[llm>]` trace
+  entry under R-92NN-7DNI) and is exactly the symptom this
+  requirement exists to forbid.
+
+- R-JNEB-EVLU: the value of `--json-schema` is the JSON Schema
+  document itself, passed inline as a literal JSON string on the
+  command line — not a path to a file containing the schema.
+  ralph-loops constructs the flag as
+  `--json-schema '{"type":"object", ...}'` (see ralph-loops'
+  `internal/agent/engine.go`); ikigai-cli must parse the value
+  directly as JSON. Treating the value as a filesystem path is a
+  bug that surfaces as an `open: no such file or directory` error
+  on every invocation. File-path input is not supported in v1; if
+  it is added later it must be opt-in via a sentinel prefix (e.g.
+  `@path/to/schema.json`) so the bare-value form continues to mean
+  "inline literal".
+
 - R-W5A6-O0JQ: ikigai-cli speaks to provider HTTP APIs directly. No
   vendor SDK (Anthropic, OpenAI, Google) may be linked. General-
   purpose libraries — HTTP client, SSE parser, JSON, CLI framework,
   filesystem helpers — are permitted.
+
+- R-92NN-7DNI: ikigai-cli accepts a `--raw` boolean flag that
+  defaults to `false`. When `--raw` is `true`, ikigai-cli emits
+  a debug trace to **stdout** that MUST cover all three of the
+  following boundaries — partial coverage of any one boundary
+  does not satisfy this requirement:
+  1. **Every message read from stdin.** As soon as ikigai-cli
+     parses one stream-json event off its stdin, it writes a
+     trace entry containing that event's complete raw bytes.
+     Prefix: `[stdin>] `. This is the visible proof that
+     ikigai-cli has consumed the operator's input.
+  2. **Every message sent to the provider's LLM.** As soon as
+     ikigai-cli sends an HTTP request to the provider's
+     model-completion endpoint, it writes a trace entry
+     containing the complete request body (the JSON sent to
+     the LLM), the request URL, and the request method.
+     Prefix: `[llm>] `. One trace entry per HTTP request — if
+     a single iteration makes multiple round-trips (because of
+     tool-use turns), every round-trip's outbound body is
+     logged.
+  3. **Every message received from the provider's LLM.** As
+     bytes arrive from the provider over HTTP / SSE,
+     ikigai-cli writes a trace entry per SSE event (or, for a
+     non-streaming response, one entry for the complete body)
+     containing the raw payload received and the HTTP status
+     code that opened the response. Prefix: `[<llm] `. A hung
+     iteration must surface as a `[llm>] ` with no following
+     `[<llm] ` (or with a partial sequence stopping at a
+     specific event), so the operator can see exactly where
+     the LLM round-trip stalled.
+  Trace formatting rules (apply to all three boundaries):
+  - Each trace entry begins on a fresh line — ikigai-cli
+    writes a leading newline before its prefix if the previous
+    byte on stdout was not already `\n`. This prevents trace
+    entries from being mashed onto the same visual line as
+    upstream output (e.g. ralph-loops' `--raw` echo).
+  - Each entry carries an RFC 3339 timestamp with subsecond
+    precision immediately after its prefix.
+  - Multi-line payloads are written verbatim; each next trace
+    entry's leading newline keeps boundaries unambiguous.
+  When `--raw` is `true` the stdout-is-only-stream-json
+  invariant of R-UXDS-W9UQ is intentionally relaxed: trace
+  entries are interleaved with stream-json events on the same
+  stream. ralph-loops only passes `--raw` to ikigai-cli when
+  the operator has run ralph with its own `--raw` flag, in
+  which case ralph dumps the engine's stdout verbatim rather
+  than parsing it. When `--raw` is `false`, R-UXDS-W9UQ holds
+  unchanged.
+  Provider API key values MUST NEVER appear in trace output.
+  Redaction applies to every header field, query parameter, or
+  body field whose value matches a configured API key — not
+  only to the `Authorization` header. (Note: the request and
+  response bodies covered by `[llm>] ` and `[<llm] ` should
+  not contain the API key in normal operation; redaction
+  exists as a defense in depth.)
+  This is an MVP debug aid; the flag and its behavior are
+  expected to be replaced by structured tracing or removed
+  once the loop is proven end-to-end. The flag belongs to
+  ikigai-cli itself, not to the ralph drop-in flag set pinned
+  by R-6TC0-ZSKM / R-Z4YN-KG36.
+
+- R-2247-BPXI: startup errors — missing or unreadable provider
+  credentials (R-YL2Y-7HXQ), unknown `--model` prefix
+  (R-XBYO-1ZI1), unknown model in the registry (R-ZCFX-5XZ8),
+  illegal `--effort` for the selected model (R-ZX67-O1L1), and
+  unrecognized CLI flags — are reported by writing a single
+  human-readable message to stderr that names the specific
+  problem (for missing credentials, the env var that was unset
+  and the provider it belongs to), exiting with a non-zero
+  status, and writing nothing to stdout. No `result` event, no
+  `system` event, no partial stream-json on stdout. The
+  orchestrator's "stream ended without result" path is the
+  intended consumer of this failure mode; in-iteration failures
+  continue to follow R-E2W7-K5JB. The usage block printed by the
+  Go flag parser on unknown-flag rejection counts as the human-
+  readable stderr message and satisfies this requirement.
 
 ## Provider model
 
@@ -115,12 +224,22 @@ are explicitly not part of the target audience.
   a passthrough to the real `claude` binary — it uses the Messages
   API and runs tools locally, same as the other backends.
 
-- R-B9P4-41S7: every tool ikigai-cli implements is offered to the
-  underlying model on every request. Ralph-loops never narrows the
-  set via `--tools` (it passes the flag empty, which Claude treats
-  as "all built-ins"), so the surface ikigai-cli ships *is* the
-  surface the model sees. Adding a tool is therefore a v-bump
-  decision, not a per-invocation one.
+- R-YFCR-J9IL: the `--tools` flag accepts a comma-separated list
+  of tool names and narrows the set offered to the underlying
+  model on each request to exactly those names. An empty value
+  (the default — and what ralph-loops passes when its own Tools
+  config is empty) means "offer every tool ikigai-cli ships,"
+  matching `claude`'s convention. Tool names are case-sensitive
+  and must match the canonical PascalCase names ikigai-cli
+  registers (currently `Read` and `Bash`); an unknown name in
+  the list is a fatal startup error per R-2247-BPXI whose
+  message lists the registered tool names. Whitespace around
+  commas is tolerated; empty list elements (e.g. `--tools=,Bash`
+  or trailing commas) are tolerated and ignored. The set of
+  tools ikigai-cli *can* offer is still a v-bump decision —
+  this flag only chooses among the tools the running binary
+  already implements; it cannot enable a tool the binary does
+  not ship.
 
 - R-ZRRF-LGW1: tool-call and tool-result turns appear on stdout in
   Claude's stream-json shape (`assistant` events containing

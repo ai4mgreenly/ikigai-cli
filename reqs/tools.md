@@ -2,7 +2,7 @@
 
 This file specifies the tools ikigai-cli implements and exposes to
 the underlying model. v1 ships exactly two: Read and Bash (per
-OVERVIEW R-AQ6C-0C5B). The model handles writes, edits, file
+R-AQ6C-0C5B). The model handles writes, edits, file
 discovery, and content search via shell commands until the tool
 set is expanded in a later version.
 

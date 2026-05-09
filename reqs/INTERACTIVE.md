@@ -84,9 +84,14 @@ Recover the timestamp an ID was minted from:
 
     ralph time-of R-XXXX-XXXX
 
-Tag a requirement by placing the ID at the start of the line, e.g.
+Tag a requirement bullet by placing the ID at the start of the
+line, e.g.
 
-    - R-052Y-EKE0: anonymous visitors cannot post comments.
+    R-XXXX-XXXX: anonymous visitors cannot post comments.
+
+(in the actual spec the bullet's leading `- ` precedes the ID;
+the dash is dropped here so this illustrative line doesn't read
+as a real requirement.)
 
 Treat each ID as a stable handle on one specific claim. The rules:
 
