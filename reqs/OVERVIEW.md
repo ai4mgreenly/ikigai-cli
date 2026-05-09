@@ -143,6 +143,19 @@ are explicitly not part of the target audience.
   no runtime dependencies, suitable for dropping next to the real
   `claude` binary on the user's `PATH`.
 
+- R-J5PD-8EBD: the project ships a `Makefile` at the repo root
+  with at minimum these targets:
+  - `build` (default — runs when `make` is invoked with no args):
+    produces the `ikigai-cli` binary at a known path under the
+    repo (typical: `./bin/ikigai-cli`).
+  - `test`: runs the project's automated test suite and exits
+    non-zero on any failure.
+  - `install`: places the built binary on the user's `PATH` at a
+    standard location (typical: `$GOBIN` or `$GOPATH/bin`).
+  - `clean`: removes build artifacts produced by `build`.
+  Targets are independent — `test` and `install` may depend on
+  `build`, but `clean` must not depend on a build step.
+
 - R-BUFE-M5E0: all meaningful behavior lives in importable Go
   packages. The `cmd/ikigai-cli` binary is a thin wiring layer that
   parses flags, hooks stdin/stdout/signals, and delegates to those
