@@ -149,7 +149,18 @@ are explicitly not part of the target audience.
     produces the `ikigai-cli` binary at a known path under the
     repo (typical: `./bin/ikigai-cli`).
   - `test`: runs the project's automated test suite and exits
-    non-zero on any failure.
+    non-zero on any failure. Tests that exercise the Anthropic
+    backend require a real `ANTHROPIC_API_KEY`; the `test` target
+    reads the key from `$HOME/.secrets/ANTHROPIC_API_KEY` (a
+    single-line file containing the bare key) and exports it
+    into the test environment. The key value MUST NOT be echoed,
+    logged, included in test output, embedded in error messages,
+    written to any file under the repo, or otherwise surfaced
+    where it could land in an agent's context, terminal scrollback,
+    CI log, or commit. If the key file is absent, `test` fails
+    with a clear message naming the missing file (not its content)
+    rather than running a partial suite or making a real request
+    with no auth.
   - `install`: places the built binary at `~/.local/bin/ikigai-cli`,
     creating the directory if it does not exist. Users are
     expected to have `~/.local/bin` on their `PATH`.
