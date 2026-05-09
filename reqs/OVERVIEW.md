@@ -22,6 +22,21 @@ ralph-loops, and ralph-loops alone in v1. Human users, other
 orchestrators, IDE integrations, and the broader `claude` CLI surface
 are explicitly not part of the target audience.
 
+## MVP scope
+
+- R-S04B-QD3D: v1 implements Anthropic only. OpenAI and Google
+  Gemini are deliberately deferred to a later version. The
+  provider abstraction, model registry shape, effort vocabulary
+  (native pass-through), and tool-runtime / wire-format
+  separation must nonetheless be designed assuming all three
+  providers will eventually be supported — adding OpenAI or
+  Gemini in a later version must not require re-architecting the
+  agent loop, the wire-format codec, the tool runtime, or the
+  provider interface. The reference docs at `providers/openai.md`
+  and `providers/google.md` are kept in this directory as design
+  context (so the abstraction is shaped against real provider
+  differences), not as MVP build targets.
+
 ## Configuration model
 
 - R-7IWS-GMJF: ikigai-cli is configless. It runs from built-in
@@ -113,10 +128,13 @@ are explicitly not part of the target audience.
   regardless of how the underlying provider represented them on the
   wire.
 
-- R-AQ6C-0C5B: v1 implements exactly six tools — Read, Write,
-  Edit, Glob, Grep, Bash — and offers all six to the model on
-  every request. Additional tools listed in `tools.md` ship in
-  later versions, not v1.
+- R-AQ6C-0C5B: v1 implements exactly two tools — Read and Bash —
+  and offers both to the model on every request. The model can
+  perform writes, edits, file discovery, and content search via
+  shell commands at a token-cost premium; expanding the tool set
+  is a v1.x decision once the agent loop is proven end-to-end.
+  Additional tools listed in `tools.md` ship in later versions,
+  not v1.
 
 ## Stack constraints
 
@@ -135,13 +153,6 @@ are explicitly not part of the target audience.
   `context.Context`, and configuration values. This is forward-
   looking: ralph-loops is expected to eventually link the same
   packages in-process and skip the subprocess boundary entirely.
-
-- R-CGDL-I0QI: the stream-json wire-format codec is a separable
-  package. In-process callers must be able to either (a) keep using
-  the codec over an `io.Pipe` for transport-level parity with the
-  subprocess mode, or (b) bypass the codec and consume the agent
-  loop's events as native Go values. Both paths are part of the
-  supported surface, not internal details.
 
 
 ## Out of scope for v1

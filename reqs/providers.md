@@ -72,24 +72,16 @@ existing provider is a routine spec edit, not a re-architecture.
   parameter) follows whatever Anthropic documents at
   implementation time.
 
-- R-31CY-UXSX: Anthropic backend supports the following models in
-  v1, with the listed effort vocabulary:
-
-  | Model ID (bare) | Aliases | Effort values | Notes |
-  |---|---|---|---|
-  | `claude-opus-4-7` | `opus`, `best` | `low`, `medium`, `high`, `xhigh`, `max` | Adaptive thinking only; manual budget rejected |
-  | `claude-sonnet-4-6` | `sonnet` | `low`, `medium`, `high`, `max` | No `xhigh` |
-  | `claude-haiku-4-5` | `haiku` | (none — effort flag must be omitted) | No effort param accepted |
-
-  Bracketed `[1m]` variants of `opus` and `sonnet` aliases (and
-  the bare IDs `claude-opus-4-7[1m]`, `claude-sonnet-4-6[1m]`)
-  are accepted and route to 1M-context mode.
-
-- R-3OJ2-4KW4: legacy Anthropic models (`claude-opus-4-6`,
-  `claude-opus-4-5`, `claude-sonnet-4-5`, `claude-opus-4-1`,
-  `claude-sonnet-4`, `claude-opus-4`) are NOT supported in v1,
-  even though they remain GA on the Messages API. Adding them is
-  a future spec edit; v1 keeps the surface small and current.
+- R-31CY-UXSX: Anthropic backend in MVP supports a single model:
+  `claude-haiku-4-5` (alias `haiku`). Haiku 4.5 takes no `--effort`
+  argument; if supplied, ikigai-cli rejects it with an error
+  listing the supported value (none). This deliberately avoids
+  effort-validation work in MVP while exercising every other part
+  of the agent loop. Opus 4.7, Sonnet 4.6, their `[1m]` variants,
+  and the legacy 4.x models will be added in a later version once
+  Haiku is round-tripping clean; the model registry per
+  R-YRPM-NUDF must be shaped so that adding them is a data edit
+  not an architecture change.
 
 - R-4AH9-0G8M: tool-use round-trip is direct: the Messages API's
   `tool_use` and `tool_result` content blocks are isomorphic to
@@ -99,11 +91,18 @@ existing provider is a routine spec edit, not a re-architecture.
 
 - R-4WFF-WBL4: Anthropic's `thinking` content blocks (when
   emitted by the model in adaptive-thinking mode) are forwarded
-  to stdout as `thinking` blocks per wire-format.md R-XYKN-UC0Z.
-  Forwarding is optional but recommended for parity with the real
-  `claude` binary.
+  to stdout as `thinking` blocks per wire-format.md R-SA9P-R1H4.
 
-## OpenAI
+## OpenAI — DESIGN CONTEXT, NOT MVP
+
+**The OpenAI section below is retained to inform the provider
+abstraction's shape per OVERVIEW R-S04B-QD3D, but is NOT built in
+MVP.** The build agent should not implement an OpenAI backend in
+v1; the requirements here document what a v2 OpenAI backend must
+satisfy and what differences from Anthropic the abstraction must
+admit.
+
+
 
 - R-5H5Q-EF6X: ikigai-cli's OpenAI backend talks to the OpenAI
   Responses API over HTTPS with SSE for streaming. The Chat
@@ -161,7 +160,14 @@ existing provider is a routine spec edit, not a re-architecture.
   current API docs), the OpenAI backend falls back to prompt-
   level instruction plus local validation per R-WFWM-BKWX.
 
-## Google Gemini
+## Google Gemini — DESIGN CONTEXT, NOT MVP
+
+**The Google Gemini section below is retained to inform the
+provider abstraction's shape per OVERVIEW R-S04B-QD3D, but is NOT
+built in MVP.** The build agent should not implement a Google
+backend in v1; the requirements here document what a v2 Google
+backend must satisfy and what differences from Anthropic the
+abstraction must admit.
 
 - R-9N5D-G7EC: ikigai-cli's Google backend talks to the
   Generative Language API (`generativelanguage.googleapis.com`)
@@ -225,20 +231,20 @@ existing provider is a routine spec edit, not a re-architecture.
   provider. When a multi-turn iteration uses tools, every request
   to the provider after the first carries the prior assistant
   turn's thinking/reasoning blocks intact in the conversation
-  history. This is:
-  - **Required for Anthropic correctness** — Opus 4.7's adaptive
-    thinking is automatic and non-disable-able; the API
-    cryptographically verifies the preserved `signature` on
-    thinking blocks that precede a `tool_use`/`tool_result` pair
-    and 400-rejects requests that drop them.
-  - **Required for OpenAI quality** — under `store: false`, the
-    backend must request `include: ["reasoning.encrypted_content"]`
-    and round-trip the resulting `reasoning` items in subsequent
-    `input` arrays. Without this, reasoning models start cold on
-    every post-tool turn.
-  - **Required for Gemini quality** — `thoughtSignature` on
-    `thought` parts must be echoed back in subsequent contents.
-  Failing to preserve these is a v1 bug, not a tradeoff.
+  history.
+  - **MVP — Anthropic correctness**: Haiku 4.5 supports adaptive
+    thinking; signed thinking blocks paired with `tool_use` must
+    be preserved or the API 400-rejects subsequent requests
+    carrying the matching `tool_result`. Non-negotiable for any
+    Anthropic iteration that uses tools.
+  - **v2 — OpenAI quality**: under `store: false`, the backend
+    must request `include: ["reasoning.encrypted_content"]` and
+    round-trip `reasoning` items in subsequent `input` arrays.
+  - **v2 — Gemini quality**: `thoughtSignature` on `thought` parts
+    must be echoed back in subsequent contents.
+  The abstraction must accommodate per-provider thinking-state
+  preservation as a first-class concept, not an Anthropic-only
+  hack bolted on later.
 
 - R-WFWM-BKWX: delivering schema-conforming
   `result.structured_output` is ikigai-cli's responsibility for
@@ -253,28 +259,13 @@ existing provider is a routine spec edit, not a re-architecture.
   iteration error. A model is not "supported" if ikigai-cli
   cannot guarantee structured output for it.
 
-- R-E2W7-K5JB: each provider backend is responsible for mapping
-  HTTP and SSE errors into either (a) tool-result errors, when an
-  individual tool call fails, or (b) iteration-level errors,
-  emitted as `result` events with `is_error: true`. Provider
-  errors must not crash ikigai-cli or leak raw HTTP status codes
-  / response bodies onto stdout.
-
-- R-ENMI-2954: rate-limit handling. When a provider returns a
-  rate-limit response (HTTP 429 with retry metadata), ikigai-cli
-  may optionally emit a `rate_limit_event` per wire-format.md
-  R-4QGK-CGBV. Whether ikigai-cli itself retries the request, or
-  surfaces the rate limit immediately as an iteration error, is
-  a per-provider implementation choice. Defaults: no automatic
-  retry; surface as iteration error. Ralph-loops handles its own
-  retries at the loop layer.
-
-- R-FEGA-H7GE: connection timeouts. Each provider backend
-  enforces a request-level read timeout (default 600 seconds,
-  matching the Bash tool's hard ceiling) on the streaming HTTP
-  call. Exceeding the timeout terminates the iteration with an
-  error result event and does not leave a half-streamed
-  conversation in flight.
+- R-E2W7-K5JB: provider HTTP/SSE errors, rate-limit responses,
+  and connection timeouts terminate the iteration with a `result`
+  event carrying `is_error: true`. ikigai-cli does not retry at
+  the provider layer in MVP — ralph-loops owns retry policy at
+  the loop layer. Raw HTTP status codes and response bodies must
+  not leak onto stdout; the iteration-error result event is the
+  only externally-visible failure surface.
 
 - R-G0EH-D2SW: the provider abstraction layer's interface is the
   set of operations needed by the agent loop:

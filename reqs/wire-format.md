@@ -37,7 +37,11 @@ about.
 
 - R-TSL0-SJTK: every event object has a top-level `type` string
   that discriminates its shape. The set of types ikigai-cli emits
-  is `assistant`, `user`, `result`, `system`, `rate_limit_event`.
+  in v1 is `assistant`, `user`, `result`. (`system` and
+  `rate_limit_event` are part of Claude Code's stream-json
+  surface but ralph-loops only consumes them in verbose mode and
+  behaves correctly without them; they may be added in a later
+  version.)
 
 ## Stdin: events ikigai-cli accepts
 
@@ -118,10 +122,13 @@ about.
   result event as the terminator and stops reading.
 
 - R-13ZB-EZZK: the `result` event has shape
-  `{"type":"result","structured_output":<json-value>,"is_error":<bool>,"num_turns":<int>,"duration_ms":<int>,"total_cost_usd":<number>,"usage":<usage-object-or-null>}`.
+  `{"type":"result","structured_output":<json-value>,"is_error":<bool>}`.
   `structured_output` is the only field required for ralph-loops
-  to make progress; the others are logged and tallied but not used
-  for control flow.
+  to make progress; `is_error` flags iteration-level failure.
+  Optional fields (`num_turns`, `duration_ms`, `total_cost_usd`,
+  `usage` with token counts) may be added in later versions for
+  parity with `claude`'s verbose-mode output but are not part of
+  the MVP contract.
 
 - R-1OPL-X3LD: `structured_output` must be a JSON value that
   validates against the schema supplied via `--json-schema`. For
@@ -130,45 +137,6 @@ about.
   output within the iteration, it emits a `result` event with
   `is_error: true` and a structured_output value that fails
   validation; ralph-loops will retry up to its configured limit.
-
-- R-2ANS-SYXV: the `usage` object, when present, has shape
-  `{"input_tokens":<int>,"output_tokens":<int>,"cache_read_input_tokens":<int>,"cache_creation_input_tokens":<int>}`.
-  ikigai-cli should populate it with whatever the underlying
-  provider reports; missing or unsupported fields may be omitted
-  or reported as zero. Cache fields apply only to providers that
-  return prompt-cache statistics (Anthropic does; OpenAI and
-  Google currently do not — those should be zero).
-
-- R-2WLZ-OUAD: `total_cost_usd` is a best-effort estimate based on
-  the provider's published per-token pricing for the model used.
-  Exact accuracy is not contractual; ralph-loops only logs this
-  value. If pricing data is unavailable for a model, the field is
-  reported as zero.
-
-- R-3HCA-6XW6: `num_turns` is the count of assistant turns that
-  occurred within the iteration (one per round-trip to the
-  provider). `duration_ms` is the wall-clock time in milliseconds
-  from the first stdin read to just before the result event is
-  emitted. Both are best-effort and used only for ralph-loops'
-  summary line.
-
-## Stdout: `system` and `rate_limit_event`
-
-- R-43AH-2T8O: ikigai-cli emits at most one `system` event per
-  iteration, at session start, with shape
-  `{"type":"system","subtype":"init","model":"<model-id>","cwd":"<absolute-path>","permissionMode":"<string>","tools":[<tool-name>,...]}`.
-  ralph-loops only consumes this in verbose mode; it is logged but
-  not required for control flow. Emitting it keeps ikigai-cli's
-  surface aligned with the real claude binary so verbose
-  diagnostic output matches expectations.
-
-- R-4QGK-CGBV: `rate_limit_event` events are emitted only when the
-  underlying provider's HTTP response carries explicit rate-limit
-  metadata that ikigai-cli decides to forward. Shape:
-  `{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"<string>","status":"<string>","utilization":<number>,"resetsAt":"<rfc3339>","isUsingOverage":<bool>}}`.
-  Forwarding is optional; ralph-loops only logs these in verbose
-  mode. If ikigai-cli omits them entirely, ralph-loops behaves
-  correctly.
 
 ## Tool correlation and ordering
 
@@ -184,32 +152,11 @@ about.
   before the iteration's `result` event. ikigai-cli must not emit
   a `result` while there are unanswered tool calls pending.
 
-## Forward compatibility
-
-- R-6KB5-02DD: ralph-loops tolerates unknown event types and
-  unknown content-block types — it logs them and continues. This
-  gives ikigai-cli room to add experimental event types or block
-  types in later versions without breaking existing ralph-loops
-  builds. ikigai-cli should also tolerate unknown fields within
-  events on stdin: parsing should succeed and unknown fields
-  should be ignored.
-
 ## Out of contract
 
-The following fields exist in Claude Code's stream-json but are
-**not** read by ralph-loops and therefore not part of the v1
-contract surface. ikigai-cli may include them, omit them, or fill
-them with zero/null:
-
-- `assistant.message.id`, `model`, `stop_reason`, `stop_sequence`,
-  and any other Anthropic-Messages-API metadata fields.
-- `assistant.message.usage` (per-turn usage; ralph-loops only reads
-  the aggregate on the result event).
-- Block-level `cache_control` annotations.
-- `system.cwd` (logged but not interpreted), `permissionMode`
-  (logged but not enforced — ikigai-cli has no permission system
-  per OVERVIEW R-1O1T-0MEX), `tools` (logged but not validated).
-- Any field on `result` beyond those enumerated in R-13ZB-EZZK.
-
-Adding such fields for parity with the real binary's verbose-mode
-output is fine; their absence is also fine.
+ralph-loops reads only the fields enumerated above. Anything else
+in Claude Code's stream-json — `assistant.message.id` /
+`stop_reason` / per-turn `usage`, block-level `cache_control`,
+optional `result` fields beyond R-13ZB-EZZK — may be included or
+omitted at ikigai-cli's discretion. Adding parity fields later is
+not a breaking change.
