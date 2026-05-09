@@ -156,13 +156,10 @@ existing provider is a routine spec edit, not a re-architecture.
 - R-92F2-Y3SJ: structured-output enforcement for the iteration's
   final `result.structured_output` uses OpenAI's native
   Responses-API structured-output feature (response format with
-  JSON schema) when supported by the selected model. For
-  `gpt-5.4-pro` (which the API docs flag as not supporting
-  structured outputs), ikigai-cli falls back to prompt-level
-  instruction plus post-validation: it asks the model for the
-  schema-conformant JSON in plain text and validates locally.
-  (OPEN: confirm fallback behavior is acceptable, or whether v1
-  should simply reject `gpt-5.4-pro` for ralph-loops use.)
+  JSON schema) when supported by the selected model. For models
+  that lack native structured outputs (e.g. `gpt-5.4-pro` per
+  current API docs), the OpenAI backend falls back to prompt-
+  level instruction plus local validation per R-WFWM-BKWX.
 
 ## Google Gemini
 
@@ -222,6 +219,39 @@ existing provider is a routine spec edit, not a re-architecture.
   support it.
 
 ## Cross-cutting provider behavior
+
+- R-ROBI-V64M: provider-side thinking / reasoning state must be
+  preserved across all in-iteration round-trips with the same
+  provider. When a multi-turn iteration uses tools, every request
+  to the provider after the first carries the prior assistant
+  turn's thinking/reasoning blocks intact in the conversation
+  history. This is:
+  - **Required for Anthropic correctness** — Opus 4.7's adaptive
+    thinking is automatic and non-disable-able; the API
+    cryptographically verifies the preserved `signature` on
+    thinking blocks that precede a `tool_use`/`tool_result` pair
+    and 400-rejects requests that drop them.
+  - **Required for OpenAI quality** — under `store: false`, the
+    backend must request `include: ["reasoning.encrypted_content"]`
+    and round-trip the resulting `reasoning` items in subsequent
+    `input` arrays. Without this, reasoning models start cold on
+    every post-tool turn.
+  - **Required for Gemini quality** — `thoughtSignature` on
+    `thought` parts must be echoed back in subsequent contents.
+  Failing to preserve these is a v1 bug, not a tradeoff.
+
+- R-WFWM-BKWX: delivering schema-conforming
+  `result.structured_output` is ikigai-cli's responsibility for
+  every supported model, not the provider's. Native structured-
+  output features (OpenAI response_format JSON schema, Gemini
+  responseSchema, Anthropic tool-call coercion patterns) are used
+  as optimizations when available. When the selected model does
+  not natively support schema-constrained output, the backend
+  must fall back to prompt-level instruction plus local
+  validation against the supplied `--json-schema`, retrying the
+  model up to a bounded number of times before surfacing an
+  iteration error. A model is not "supported" if ikigai-cli
+  cannot guarantee structured output for it.
 
 - R-E2W7-K5JB: each provider backend is responsible for mapping
   HTTP and SSE errors into either (a) tool-result errors, when an

@@ -73,12 +73,18 @@ about.
   `input` is a JSON value (object, string, or null) representing
   the tool arguments.
 
-- R-XYKN-UC0Z: extended-thinking / reasoning output, when the
-  underlying provider emits it and ikigai-cli chooses to forward
-  it, appears as content blocks of shape
-  `{"type":"thinking","thinking":"<string>"}`. Forwarding thinking
-  blocks is optional in v1 — ralph-loops only logs their length —
-  but if forwarded, this is the required shape.
+- R-SA9P-R1H4: extended-thinking / reasoning output, when the
+  underlying provider emits it, is forwarded to stdout as content
+  blocks of shape `{"type":"thinking","thinking":"<string>"}`.
+  ikigai-cli already preserves these blocks internally per
+  providers.md R-ROBI-V64M (a correctness requirement on
+  Anthropic, a quality requirement elsewhere); emitting them on
+  stdout costs essentially nothing on top of that and matches the
+  real `claude` binary's verbose-mode output. Ralph-loops only
+  logs their length, but the parity is worth keeping. Providers
+  that don't expose thinking text to the client (Gemini without
+  `includeThoughts: true`) emit no thinking blocks; that's
+  acceptable.
 
 ## Stdout: `user` events
 
