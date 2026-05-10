@@ -690,6 +690,28 @@ func TestR_8SDW_BY0B_BackendDispatchFollowsProviderSelection(t *testing.T) {
 	})
 }
 
+// TestR_IOEE_QJPG_V1ShipsAllThreeProviders verifies that buildClient
+// constructs a Google backend for gemini-* models, completing the v1
+// three-provider requirement. R-IOEE-QJPG.
+func TestR_IOEE_QJPG_V1ShipsAllThreeProviders(t *testing.T) {
+	t.Setenv("GOOGLE_API_KEY", "test-google-key")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+
+	resolved := model.Resolved{Provider: model.ProviderGoogle, BareID: "gemini-3.1-pro-preview"}
+	client, apiKey, err := buildClient(resolved)
+	if err != nil {
+		t.Fatalf("buildClient(google): %v", err)
+	}
+	if apiKey != "test-google-key" {
+		t.Errorf("apiKey = %q, want test-google-key", apiKey)
+	}
+	typeName := fmt.Sprintf("%T", client)
+	if !strings.Contains(typeName, "google") {
+		t.Errorf("expected google client type, got %s", typeName)
+	}
+}
+
 // fakeTwoStepClient returns firstEvents on the first Stream call and
 // secondEvents on the second. Used to simulate a tool_use round-trip.
 type fakeTwoStepClient struct {

@@ -14,6 +14,7 @@ import (
 	"github.com/ai4mgreenly/ikigai-cli/internal/model"
 	"github.com/ai4mgreenly/ikigai-cli/internal/provider"
 	anthropicprovider "github.com/ai4mgreenly/ikigai-cli/internal/provider/anthropic"
+	googleprovider "github.com/ai4mgreenly/ikigai-cli/internal/provider/google"
 	openaiprovider "github.com/ai4mgreenly/ikigai-cli/internal/provider/openai"
 	"github.com/ai4mgreenly/ikigai-cli/internal/schema"
 	"github.com/ai4mgreenly/ikigai-cli/internal/startup"
@@ -201,6 +202,14 @@ func buildClient(resolved model.Resolved) (provider.Client, string, error) {
 	case model.ProviderOpenAI:
 		apiKey := os.Getenv(startup.OpenAIKeyEnv)
 		c, err := openaiprovider.New(apiKey, resolved.BareID)
+		if err != nil {
+			return nil, "", err
+		}
+		return c, apiKey, nil
+	// R-IOEE-QJPG: v1 ships Anthropic + OpenAI + Google.
+	case model.ProviderGoogle:
+		apiKey := os.Getenv(startup.GoogleKeyEnv)
+		c, err := googleprovider.New(apiKey, resolved.BareID)
 		if err != nil {
 			return nil, "", err
 		}

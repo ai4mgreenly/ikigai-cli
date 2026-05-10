@@ -49,6 +49,23 @@ existing provider is a routine spec edit, not a re-architecture.
   must declare every rate it bills on, otherwise the cost
   totals would be silently wrong.
 
+- R-V2X8-QZDK: a model whose published pricing varies by request
+  size (Anthropic 1M-context tier above 200k input tokens;
+  Gemini 3.1 Pro Preview's >200k input premium; analogous tiers
+  on future models) declares both a base rate and an
+  above-threshold rate for each billed dimension (input, output,
+  cache-read, cache-creation), plus the input-token threshold
+  above which the premium tier applies. Cost calculation per
+  R-ZZLK-I9CK selects the tier per request based on the
+  iteration's `usage.input_tokens` total: requests at or below
+  the threshold bill at the base rate; requests above the
+  threshold bill the entire request at the premium rate. Models
+  without tiered pricing declare a single rate per dimension and
+  no threshold; the cost calculation is unchanged for them. This
+  keeps the per-model rate table the sole source of truth for
+  cost per R-ZZLK-I9CK while accommodating providers that
+  publish a long-context premium.
+
 - R-ZCFX-5XZ8: a `--model` value that parses to a known provider
   but is not in the registry is rejected at startup with an error
   listing the supported models for that provider. ikigai-cli does
@@ -258,21 +275,206 @@ existing provider is a routine spec edit, not a re-architecture.
 The implementation-grade wire reference for the OpenAI backend
 lives at `providers/openai.md`.
 
-## Google Gemini — design context
+## Google
 
-Gemini is deferred to a later version; the design context that
-shaped the v1 abstraction lives under `docs/v2-providers/`:
+- R-JVAI-4WXP: ikigai-cli's Google backend talks to the Google
+  Generative Language API directly over HTTPS at
+  `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse`,
+  using Server-Sent Events (SSE) for streaming responses. The
+  non-streaming `:generateContent` endpoint is not used and not
+  supported in v1. ikigai-cli targets the AI Studio surface
+  (Generative Language API) only — Vertex AI routing is not
+  supported in v1. A future Vertex / service-account surface is
+  a v-bump decision, not a flag-driven extension.
 
-- `docs/v2-providers/overview.md` — high-level v2 design notes
-- `docs/v2-providers/google.md` — Google Generative Language API reference
+- R-KIGL-EK0W: authentication uses the `GOOGLE_API_KEY` env var,
+  passed as the `x-goog-api-key` request header per Google's
+  documented form. The legacy `?key=` query-string credential is
+  not used. No OAuth, no Application-Default-Credentials routing
+  in v1 — first-party AI Studio key only.
 
-These are not requirements the v1 build agent must satisfy.
-When Gemini work begins, mint fresh requirement IDs and place
-implementable claims back under `reqs/`. The cross-cutting
-section below still mentions Gemini behaviors as forward-looking
-obligations on the abstraction itself; those references stay
-because they constrain the v1 abstraction's shape, not because
-v1 implements Gemini.
+- R-L4ES-AFDE: Google backend in MVP supports exactly one model:
+  `gemini-3.1-pro-preview` (alias `pro`). Legal `--effort` values
+  for `gemini-3.1-pro-preview` are `low | medium | high`.
+  `gemini-3.1-pro-preview` cannot disable thinking; `none` and
+  `minimal` are rejected at startup per R-ZX67-O1L1 with an
+  error listing the three legal values. Other Gemini 3.x family
+  members (`gemini-3.1-pro-preview-customtools`, Flash variants,
+  Flash-Lite) and the 2.5 family are deferred; the model
+  registry per R-YRPM-NUDF must be shaped so adding them is a
+  data edit, not an architecture change.
+
+- R-M1C2-M8E5: when `--effort` is omitted on
+  `--model=gemini-3.1-pro-preview`, ikigai-cli sends
+  `generationConfig.thinkingConfig.thinkingLevel: "medium"`
+  explicitly in the request body. The default is pinned by the
+  model registry, not deferred to Google's server-side default
+  of `"high"`; this keeps `--raw` traces under R-92NN-7DNI
+  faithful to what was actually requested and insulates
+  ikigai-cli's behavior from drift in Google's defaults. Same
+  pattern as OpenAI per R-22XS-LD6T.
+
+- R-MTDR-EYG4: tool-use translation. Google's API represents
+  tool calls as `functionCall` parts in the streamed
+  `model`-role content, and tool results as `functionResponse`
+  parts in subsequent `user`-role content. The Google backend
+  translates these to and from Claude Code's `tool_use` /
+  `tool_result` blocks on the wire per R-ZRRF-LGW1. The
+  `functionCall.id` emitted by the model is preserved and
+  echoed back on the matching `functionResponse.id` so the
+  model can correlate parallel calls. Tool input arguments
+  arrive as a JSON object on `functionCall.args`; ikigai-cli
+  forwards the object value into stream-json `tool_use.input`
+  unchanged.
+
+- R-NNV8-Z7ZH: usage mapping. The Google API reports
+  iteration-level usage on the final SSE chunk's `usageMetadata`
+  (cumulative across the full request, with thoughts tokens
+  already folded into `candidatesTokenCount`). The Google
+  backend maps it onto the standard shape required by
+  R-YSX3-4AE9:
+  - `usage.input_tokens` ← `usageMetadata.promptTokenCount`
+    minus `usageMetadata.cachedContentTokenCount` (the standard
+    shape counts cached input separately, but Google rolls
+    cached tokens into `promptTokenCount`)
+  - `usage.output_tokens` ←
+    `usageMetadata.candidatesTokenCount` (thoughts tokens are
+    already included; do not add `thoughtsTokenCount` separately
+    or double-count)
+  - `usage.cache_read_input_tokens` ←
+    `usageMetadata.cachedContentTokenCount` (zero / absent when
+    there is no cache hit)
+  - `usage.cache_creation_input_tokens` ← `0` (Google's
+    implicit caching has no per-request creation count, and
+    explicit cache storage is billed by the hour rather than
+    per request; the field is reported as zero per R-YSX3-4AE9)
+  Cost contribution toward `total_cost_usd` and the per-model
+  `modelUsage[<model>].costUSD` is computed from these counts
+  using the Google model's pricing entry in the registry per
+  R-ZZLK-I9CK and the tiered-pricing rule per R-V2X8-QZDK;
+  Google does not expose a billing dollar amount on the
+  response, and ikigai-cli does not query a billing API.
+
+- R-OEP1-E6AR: tool-definition adaptation. The Google backend
+  rewrites each tool's neutral input schema (per tools.md
+  R-YNXM-CVXI) into the OpenAPI 3.0 subset accepted by Google's
+  `functionDeclarations[].parameters` field. Constructs that the
+  OpenAPI subset does not support (`$ref`, `oneOf`,
+  `patternProperties`, schema-valued `additionalProperties`,
+  `allOf` composition) are rejected at startup with an error
+  naming the offending construct, rather than passed through and
+  400-rejected by Google at request time. The neutral schema in
+  the tool definition is unchanged; adaptation is per-request,
+  on the wire. This is the Google-specific instance of
+  R-3959-U3A3.
+
+- R-P1V4-NTDY: stateless thinking-state round-trip. Every
+  `model`-role part returned by the API may carry a
+  `thoughtSignature`. The Google backend appends those parts to
+  the conversation history unchanged — same `thoughtSignature`
+  on the same parts in the same order — and replays them in the
+  `contents` array of every subsequent request in the same
+  iteration. This is Google's equivalent of Anthropic's signed
+  thinking blocks (R-4WFF-WBL4 / providers/anthropic.md §5) and
+  OpenAI's encrypted reasoning round-trip (R-3D9Z-4ND7), and
+  satisfies R-ROBI-V64M for the Google backend. Dropping or
+  modifying a `thoughtSignature` between turns invalidates the
+  signature and breaks reasoning continuity on subsequent
+  requests in the iteration. The explicit `cachedContent` API
+  is not used (R-T5EY-Y23Z); conversation state lives entirely
+  in the `contents` array.
+
+- R-PP17-XGH5: structured-output enforcement uses Google's
+  native `responseJsonSchema` mode
+  (`generationConfig.responseMimeType: "application/json"`
+  paired with `generationConfig.responseJsonSchema: <schema>`).
+  The schema supplied via `--json-schema` (per R-JNEB-EVLU) is
+  forwarded verbatim into `responseJsonSchema`. The legacy
+  `responseSchema` (OpenAPI-3 subset) is not used; Gemini 3.1
+  Pro Preview supports the draft-2020-12 `responseJsonSchema`
+  mode natively, so R-WFWM-BKWX's prompt-and-validate fallback
+  is not exercised on the Google backend. If the supplied
+  schema fails Google's validation (e.g. unsupported keywords),
+  the resulting 400 is surfaced as an iteration error per
+  R-E2W7-K5JB without translation — repairing the schema is the
+  operator's responsibility.
+
+- R-QKQL-VHR7: thinking summaries are not surfaced on stdout.
+  The Google backend sends
+  `generationConfig.thinkingConfig.includeThoughts: false` and
+  does not forward parts carrying `thought: true` as Claude
+  `thinking` blocks. The `thoughtSignature` round-trip per
+  R-P1V4-NTDY is internal to the conversation history; the
+  human-readable summary stream is not part of the v1 wire
+  surface. This keeps the Google backend's stream-json output
+  uniform with the OpenAI backend's output (R-4JYG-IMBI) and
+  avoids leaking summaries that the Google API itself treats as
+  best-effort, not authoritative.
+
+- R-R7WP-54UE: the Google backend maps Generative Language API
+  HTTP and SSE error shapes into the `provider.ErrorKind`
+  taxonomy: `UNAUTHENTICATED` → `ErrAuth`; `INVALID_ARGUMENT` /
+  `FAILED_PRECONDITION` / `NOT_FOUND` / `PERMISSION_DENIED` →
+  `ErrInvalidRequest`; `RESOURCE_EXHAUSTED` → `ErrRateLimit`;
+  read/connect timeouts and `DEADLINE_EXCEEDED` → `ErrTimeout`;
+  `INTERNAL` / `UNAVAILABLE` and other 5xx → `ErrServer`;
+  anything else → `ErrUnknown`. In-stream errors that arrive as
+  a `data:` SSE chunk whose payload contains an `error` key
+  (rather than a `candidates` array) are handled per
+  R-UFR5-HCAD. Raw HTTP status codes and response bodies do not
+  reach stdout, per R-E2W7-K5JB.
+
+- R-RTUW-106W: the system prompt under R-8PF6-I8FP is delivered
+  to the Generative Language API via the top-level
+  `systemInstruction` field, not as a `user`-role turn at the
+  start of `contents`. This keeps the framing prompt out of
+  conversational turn-counting and matches the API's documented
+  `systemInstruction` semantics (separate from `contents`,
+  applied with framing precedence). Same pattern as OpenAI's
+  `instructions` (R-5RUU-AD0I).
+
+- R-SFT2-WVJE: the Google backend sends explicit
+  `safetySettings` setting `threshold: "BLOCK_NONE"` for every
+  documented harm category
+  (`HARM_CATEGORY_HARASSMENT`, `HARM_CATEGORY_HATE_SPEECH`,
+  `HARM_CATEGORY_SEXUALLY_EXPLICIT`,
+  `HARM_CATEGORY_DANGEROUS_CONTENT`,
+  `HARM_CATEGORY_CIVIC_INTEGRITY`). Google's default thresholds
+  reject benign agentic queries often enough that surprising
+  provider-side moderation refusals would leak into iteration
+  errors per R-E2W7-K5JB; the operator running ikigai-cli is
+  responsible for content judgment on inputs and outputs, not
+  the provider. Anthropic and OpenAI expose no comparable knob
+  in v1; this requirement is Google-specific.
+
+- R-T5EY-Y23Z: Google's explicit `cachedContent` API
+  (`POST /v1beta/cachedContents` and the top-level
+  `cachedContent` request field) is not used in v1. ikigai-cli
+  relies on Google's implicit prefix caching on Gemini 3.x and
+  surfaces hits via `cachedContentTokenCount` per R-NNV8-Z7ZH.
+  Lifecycle management of explicit cache resources is a v-bump
+  decision, not a flag-driven extension.
+
+- R-TTSY-LGXV: when tools are supplied,
+  `toolConfig.functionCallingConfig.mode` is sent as `"AUTO"`,
+  matching Anthropic's default `{type:"auto"}` (R-4AH9-0G8M)
+  and OpenAI's default `tool_choice: "auto"` (R-2RBS-8S0P).
+  Google's newer `"VALIDATED"` mode (server-side schema
+  enforcement on tool args) is not requested in v1. Mode
+  override via spec or flag is deferred.
+
+- R-UFR5-HCAD: in-stream errors. Per Google's documented
+  streaming-error semantics, an error that occurs after the SSE
+  connection has been established arrives as a regular `data:`
+  chunk whose JSON payload carries an `error` key in place of
+  `candidates`. The Google backend inspects every SSE chunk for
+  an `error` key before treating it as a
+  `GenerateContentResponse`, and routes any such chunk through
+  R-R7WP-54UE's error-taxonomy mapping, terminating the
+  iteration per R-E2W7-K5JB.
+
+The implementation-grade wire reference for the Google backend
+lives at `providers/google.md`.
 
 ## Cross-cutting provider behavior
 
@@ -292,8 +494,12 @@ v1 implements Gemini.
     and round-trip `reasoning` items in subsequent `input`
     arrays. See R-3D9Z-4ND7. Non-negotiable for any OpenAI
     iteration that uses tools or reasoning.
-  - **v2 — Gemini quality**: `thoughtSignature` on `thought` parts
-    must be echoed back in subsequent contents.
+  - **MVP — Google correctness**: every `model`-role part
+    returned by the Generative Language API may carry a
+    `thoughtSignature`; the backend must preserve those parts
+    unchanged and replay them on the same parts in subsequent
+    `contents` arrays. See R-P1V4-NTDY. Non-negotiable for any
+    Google iteration that uses tools or reasoning.
   The abstraction must accommodate per-provider thinking-state
   preservation as a first-class concept, not an Anthropic-only
   hack bolted on later.

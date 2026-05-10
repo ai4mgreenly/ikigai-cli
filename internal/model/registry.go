@@ -30,19 +30,38 @@ import (
 // R-ZZLK-I9CK: every registry entry must declare all rates it bills on.
 // Zero means the provider does not charge for that tier (e.g. OpenAI
 // has no cache-creation charge, so CacheCreationPerM is 0 for gpt-5.5).
+//
+// R-V2X8-QZDK: models with tiered pricing set InputTokenThreshold > 0
+// and populate the AboveThreshold* fields. When the request's input tokens
+// exceed the threshold, the entire request bills at the above-threshold
+// rates; otherwise the base rates apply.
 type PricingSpec struct {
 	InputPerM         float64 // USD per million input tokens
 	OutputPerM        float64 // USD per million output tokens
 	CacheReadPerM     float64 // USD per million cache-read input tokens
 	CacheCreationPerM float64 // USD per million cache-creation input tokens
+
+	// R-V2X8-QZDK: when InputTokenThreshold > 0, requests whose input_tokens
+	// exceed this value bill at the AboveThreshold* rates for the entire request.
+	InputTokenThreshold             int
+	AboveThresholdInputPerM         float64
+	AboveThresholdOutputPerM        float64
+	AboveThresholdCacheReadPerM     float64
+	AboveThresholdCacheCreationPerM float64
 }
 
 // ComputeCost returns the total USD cost for the given token counts.
+// R-V2X8-QZDK: when InputTokenThreshold > 0 and inputTokens exceeds it,
+// the above-threshold rates apply to the entire request.
 func (p PricingSpec) ComputeCost(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int) float64 {
-	return float64(inputTokens)/1e6*p.InputPerM +
-		float64(outputTokens)/1e6*p.OutputPerM +
-		float64(cacheReadTokens)/1e6*p.CacheReadPerM +
-		float64(cacheCreationTokens)/1e6*p.CacheCreationPerM
+	in, out, cr, cc := p.InputPerM, p.OutputPerM, p.CacheReadPerM, p.CacheCreationPerM
+	if p.InputTokenThreshold > 0 && inputTokens > p.InputTokenThreshold {
+		in, out, cr, cc = p.AboveThresholdInputPerM, p.AboveThresholdOutputPerM, p.AboveThresholdCacheReadPerM, p.AboveThresholdCacheCreationPerM
+	}
+	return float64(inputTokens)/1e6*in +
+		float64(outputTokens)/1e6*out +
+		float64(cacheReadTokens)/1e6*cr +
+		float64(cacheCreationTokens)/1e6*cc
 }
 
 // modelSpec holds the legal --effort vocabulary, the pinned default
@@ -115,6 +134,7 @@ func ModelPricing(r Resolved) PricingSpec {
 // resolved bare ID is matched verbatim.
 // R-MPR7-P0A4: Anthropic MVP models.
 // R-1GZL-PHUB: OpenAI MVP model.
+// R-L4ES-AFDE: Google MVP model.
 // R-ZZLK-I9CK: every entry carries pricing data (USD per million tokens).
 var registry = map[Provider]map[string]modelSpec{
 	ProviderAnthropic: {
@@ -161,6 +181,30 @@ var registry = map[Provider]map[string]modelSpec{
 			},
 			contextWindow:   131072,
 			maxOutputTokens: 32768,
+		},
+	},
+	ProviderGoogle: {
+		// R-L4ES-AFDE: gemini-3.1-pro-preview accepts low|medium|high (no disable).
+		// R-M1C2-M8E5: when --effort is omitted, send "medium" (registry-pinned default).
+		// R-V2X8-QZDK: tiered pricing at 200K input-token threshold.
+		// Pricing: https://ai.google.dev/gemini-api/docs/pricing (as of 2026-05)
+		"gemini-3.1-pro-preview": {
+			efforts:       []string{"low", "medium", "high"},
+			defaultEffort: "medium",
+			pricing: PricingSpec{
+				InputPerM:         2.00,
+				OutputPerM:        12.00,
+				CacheReadPerM:     0.20,
+				CacheCreationPerM: 0.00,
+				// R-V2X8-QZDK: >200K input tokens bills the entire request at premium rates.
+				InputTokenThreshold:             200_000,
+				AboveThresholdInputPerM:         4.00,
+				AboveThresholdOutputPerM:        18.00,
+				AboveThresholdCacheReadPerM:     0.40,
+				AboveThresholdCacheCreationPerM: 0.00,
+			},
+			contextWindow:   2_000_000,
+			maxOutputTokens: 8192,
 		},
 	},
 }

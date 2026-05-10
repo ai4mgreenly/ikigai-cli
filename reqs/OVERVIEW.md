@@ -24,17 +24,18 @@ are explicitly not part of the target audience.
 
 ## MVP scope
 
-- R-6MCB-UMJV: v1 implements Anthropic and OpenAI. Google Gemini
-  is deliberately deferred to a later version. The provider
+- R-IOEE-QJPG: v1 implements Anthropic, OpenAI, and Google. The
+  per-provider MVP model coverage is pinned in `providers.md`:
+  Anthropic ships `claude-haiku-4-5` and `claude-sonnet-4-6`
+  (R-MPR7-P0A4); OpenAI ships `gpt-5.5` (R-1GZL-PHUB); Google
+  ships `gemini-3.1-pro-preview` (R-L4ES-AFDE). The provider
   abstraction, model registry shape, effort vocabulary (native
-  pass-through), and tool-runtime / wire-format separation must
-  nonetheless be designed assuming Gemini will eventually be
-  supported — adding Gemini in a later version must not require
-  re-architecting the agent loop, the wire-format codec, the
-  tool runtime, or the provider interface. The Gemini reference
-  doc at `docs/v2-providers/google.md` is kept as design context
-  (so the abstraction is shaped against real provider
-  differences), not as a v1 build target.
+  pass-through), and tool-runtime / wire-format separation are
+  designed so that adding new models from any of these providers
+  — or a fourth provider in a later version — is a registry-
+  data and wire-translation edit, not a re-architecture of the
+  agent loop, the wire-format codec, the tool runtime, or the
+  provider interface.
 
 ## Configuration model
 
@@ -186,16 +187,15 @@ are explicitly not part of the target audience.
 ## Provider model
 
 - R-78AI-QHWD: the supported-provider set is intentionally bounded
-  but extensible. v1 supports Anthropic and OpenAI; Gemini is the
-  deferred third provider per R-6MCB-UMJV. Adding a fourth provider
-  (or unblocking Gemini) must not require changes to the wire-
-  format translation layer or to existing tool implementations —
-  the provider interface in `internal/provider` is the only seam
-  that grows.
+  but extensible. v1 supports Anthropic, OpenAI, and Google per
+  R-IOEE-QJPG. Adding a fourth provider must not require changes
+  to the wire-format translation layer or to existing tool
+  implementations — the provider interface in `internal/provider`
+  is the only seam that grows.
 
 - R-XBYO-1ZI1: the `--model` flag always accepts the bare API model
   ID used by that provider's HTTP API (e.g. `claude-opus-4-7`,
-  `gpt-5.5`, `gemini-3-pro-preview`). Per-provider short aliases
+  `gpt-5.5`, `gemini-3.1-pro-preview`). Per-provider short aliases
   may also be accepted as sugar where the upstream first-party CLI
   defines them (Anthropic: `opus`/`sonnet`/`haiku` and bracketed
   variants like `opus[1m]`; Google: `pro`/`flash`/`flash-lite`/
@@ -229,7 +229,7 @@ are explicitly not part of the target audience.
     requirement.
   - `--model=claude-*` (or any Anthropic alias) reads
     `ANTHROPIC_API_KEY` only.
-  - `--model=gemini-*` (when Gemini lands) reads
+  - `--model=gemini-*` (or any Google alias) reads
     `GOOGLE_API_KEY` only.
   The startup-error message produced under R-2247-BPXI for a
   missing key MUST name the variable that the selected provider
@@ -258,8 +258,11 @@ are explicitly not part of the target audience.
   - `--model=claude-*` (or any Anthropic alias) instantiates
     the Anthropic backend at `internal/provider/anthropic`.
     No request to `api.openai.com` is issued.
-  - `--model=gemini-*` (when Gemini lands) instantiates the
-    Gemini backend, with the same isolation guarantee.
+  - `--model=gemini-*` (or any Google alias) instantiates the
+    Google backend at `internal/provider/google`. The iteration's
+    HTTP traffic targets `generativelanguage.googleapis.com` per
+    R-JVAI-4WXP; no request to `api.anthropic.com` or
+    `api.openai.com` is issued.
   This requirement exists to forbid the failure mode where a
   startup path that has been correctly credential-validated
   for one provider nonetheless dispatches the iteration

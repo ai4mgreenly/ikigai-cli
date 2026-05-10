@@ -51,9 +51,16 @@ type UserMessage struct {
 
 // UserEvent carries either a stdin user prompt replay or a
 // tool_result envelope.
+//
+// R-CZWA-5X35: a tool_result user event MAY carry an optional
+// top-level ToolUseResult sidecar alongside Message. Tools that have
+// a Claude Code sidecar shape populate it; others omit it entirely
+// (omitempty keeps the field absent when nil so events without a
+// sidecar are wire-identical to the old shape).
 type UserEvent struct {
-	Type    string      `json:"type"`
-	Message UserMessage `json:"message"`
+	Type          string      `json:"type"`
+	Message       UserMessage `json:"message"`
+	ToolUseResult any         `json:"tool_use_result,omitempty"`
 }
 
 // NewUserEvent fixes Type to "user" and Message.Role to "user" so
@@ -68,4 +75,13 @@ func NewUserEvent(content ...any) UserEvent {
 		Type:    "user",
 		Message: UserMessage{Role: "user", Content: content},
 	}
+}
+
+// NewUserEventWithSidecar is like NewUserEvent but also attaches a
+// tool_use_result sidecar at the top level of the event.
+// R-CZWA-5X35.
+func NewUserEventWithSidecar(sidecar any, content ...any) UserEvent {
+	ev := NewUserEvent(content...)
+	ev.ToolUseResult = sidecar
+	return ev
 }

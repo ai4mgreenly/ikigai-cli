@@ -100,3 +100,27 @@ of which provider answers.
 - R-LXOL-5ACL: `Bash` output is truncated if it exceeds 30000
   bytes total combined output. The truncation is visible to the
   model as a notice appended to the output, not silent.
+
+- R-EBGD-2Z08: `Bash` captures the subprocess's stdout and stderr
+  as separate streams internally, even though the model-facing
+  `tool_result` content combines them per R-IR21-6UNB. The split
+  capture exists so the wire-level sidecar (R-DPI6-73NQ) can
+  preserve the distinction for downstream consumers that render
+  stderr differently from stdout (notably ralph-loops' Bash
+  renderer, which dims stderr). The combined model-facing string
+  is rebuilt from the two streams; what the model sees is
+  unchanged.
+
+- R-DPI6-73NQ: `Bash` `tool_result` user events carry a
+  `tool_use_result` sidecar (per wire-format.md R-CZWA-5X35) of
+  shape
+  `{"stdout": "<string>", "stderr": "<string>", "interrupted": <bool>}`.
+  `stdout` and `stderr` are the captured streams from the
+  subprocess (each capped at the same per-stream limit as the
+  combined model-facing output, so a single runaway stream cannot
+  bypass R-LXOL-5ACL via the sidecar); `interrupted` is `true`
+  when the per-invocation timeout fired (R-JWIM-71UX) and the
+  process group was killed before completion, `false` otherwise.
+  The shape matches Claude Code CLI's Bash sidecar so a downstream
+  renderer keyed on that shape behaves the same whether the
+  underlying engine is Claude or ikigai-cli.

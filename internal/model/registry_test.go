@@ -260,6 +260,87 @@ func TestR_ZZLK_I9CK_ComputeCostUsesPerMillionRates(t *testing.T) {
 	}
 }
 
+// R-L4ES-AFDE: Google backend in MVP supports exactly one model:
+// gemini-3.1-pro-preview (alias "pro"). Legal --effort values are
+// low|medium|high; none/minimal are rejected at startup per R-ZX67-O1L1.
+func TestR_L4ES_AFDE_GoogleModelInRegistryWithEffortVocab(t *testing.T) {
+	r := Resolved{Provider: ProviderGoogle, BareID: "gemini-3.1-pro-preview"}
+
+	if err := Validate(r); err != nil {
+		t.Fatalf("Validate(gemini-3.1-pro-preview) = %v, want nil", err)
+	}
+
+	for _, effort := range []string{"low", "medium", "high"} {
+		t.Run("accept_"+effort, func(t *testing.T) {
+			if err := ValidateEffort(r, effort); err != nil {
+				t.Errorf("ValidateEffort(gemini-3.1-pro-preview, %q) = %v, want nil", effort, err)
+			}
+		})
+	}
+
+	// empty effort accepted (backend applies pinned default per R-M1C2-M8E5)
+	if err := ValidateEffort(r, ""); err != nil {
+		t.Fatalf("ValidateEffort(gemini-3.1-pro-preview, \"\") = %v, want nil", err)
+	}
+
+	// none/minimal disable thinking; rejected because the model cannot disable it
+	for _, illegal := range []string{"none", "minimal", "xhigh", "max"} {
+		t.Run("reject_"+illegal, func(t *testing.T) {
+			err := ValidateEffort(r, illegal)
+			if err == nil {
+				t.Errorf("ValidateEffort(gemini-3.1-pro-preview, %q) = nil, want rejection", illegal)
+			}
+		})
+	}
+
+	// alias "pro" must resolve to gemini-3.1-pro-preview
+	got, err := Resolve("pro")
+	if err != nil {
+		t.Fatalf("Resolve(\"pro\") = %v, want nil error", err)
+	}
+	if got.BareID != "gemini-3.1-pro-preview" || got.Provider != ProviderGoogle {
+		t.Errorf("Resolve(\"pro\") = %+v, want {ProviderGoogle, gemini-3.1-pro-preview}", got)
+	}
+}
+
+// R-V2X8-QZDK: gemini-3.1-pro-preview uses tiered pricing with a 200K
+// input-token threshold. Requests at or below the threshold bill at the
+// base rates; requests above the threshold bill the entire request at
+// the above-threshold rates. Both tiers and the boundary are verified.
+func TestR_V2X8_QZDK_TieredPricingAppliesCorrectRates(t *testing.T) {
+	r := Resolved{Provider: ProviderGoogle, BareID: "gemini-3.1-pro-preview"}
+	p := ModelPricing(r)
+
+	if p.InputTokenThreshold != 200_000 {
+		t.Fatalf("InputTokenThreshold = %d, want 200000", p.InputTokenThreshold)
+	}
+
+	// ≤200K input → base rates apply
+	// 100K input @ $2.00/M + 10K output @ $12.00/M = $0.20 + $0.12 = $0.32
+	got := p.ComputeCost(100_000, 10_000, 0, 0)
+	want := 0.32
+	if got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("≤200K: ComputeCost = %v, want %v", got, want)
+	}
+
+	// exactly 200K input → still base rates (threshold is exclusive)
+	// 200K input @ $2.00/M + 10K output @ $12.00/M = $0.40 + $0.12 = $0.52
+	got = p.ComputeCost(200_000, 10_000, 0, 0)
+	want = 0.52
+	if got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("=200K: ComputeCost = %v, want %v", got, want)
+	}
+
+	// >200K input → above-threshold rates apply to entire request
+	// 300K input @ $4.00/M + 20K output @ $18.00/M + 50K cache-read @ $0.40/M
+	// = $1.20 + $0.36 + $0.02 = $1.58
+	got = p.ComputeCost(300_000, 20_000, 50_000, 0)
+	want = 1.58
+	if got < want-0.0001 || got > want+0.0001 {
+		t.Errorf(">200K: ComputeCost = %v, want %v", got, want)
+	}
+}
+
 // R-Y23Q-MNSU: provider is inferred from the bare API ID's prefix —
 // claude-* → Anthropic, gpt-* → OpenAI, gemini-* → Google. Pin the
 // three rules with values that aren't (and won't become) registry

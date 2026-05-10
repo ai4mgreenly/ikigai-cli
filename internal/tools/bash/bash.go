@@ -2,12 +2,15 @@
 package bash
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"time"
 
@@ -35,9 +38,43 @@ var InputSchema = json.RawMessage(`{
   "required": ["command"]
 }`)
 
-// Run executes cmd via `bash -c` and returns a tool_result block
-// correlated to toolUseID containing the combined stdout+stderr
-// followed by the subprocess exit code.
+// BashSidecar is the tool_use_result sidecar emitted alongside every
+// Bash tool_result user event. R-DPI6-73NQ.
+type BashSidecar struct {
+	Stdout      string `json:"stdout"`
+	Stderr      string `json:"stderr"`
+	Interrupted bool   `json:"interrupted"`
+}
+
+// RunResult carries the model-facing tool_result block plus the
+// separately captured stdout, stderr, and interruption flag.
+//
+// R-EBGD-2Z08: stdout and stderr are captured as separate streams so
+// the wire-level sidecar (R-DPI6-73NQ) can preserve the distinction
+// for downstream consumers that render stderr differently from stdout.
+// Block.Content combines them; what the model sees is unchanged.
+type RunResult struct {
+	Block       wire.ToolResultBlock
+	Stdout      string
+	Stderr      string
+	Interrupted bool
+}
+
+// mutexWriter serialises concurrent writes from the stdout and stderr
+// drain goroutines so the combined buffer is consistent.
+type mutexWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *mutexWriter) Write(p []byte) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// Run executes cmd via `bash -c` and returns a RunResult whose Block
+// is correlated to toolUseID.
 //
 // R-IR21-6UNB: the Bash tool runs the command in a `bash -c`
 // subprocess and returns combined stdout+stderr. The command is not
@@ -51,15 +88,18 @@ var InputSchema = json.RawMessage(`{
 // directory ikigai-cli was launched in). exec.Command leaves Cmd.Dir
 // empty by default, which causes the child to inherit the parent's
 // cwd — that is precisely what this requirement specifies.
-// R-JBSB-OY94: Bash runs in the foreground only — Run blocks on
-// CombinedOutput until the subprocess exits, so the model only sees
-// the result after completion. There is no background/async path.
+// R-JBSB-OY94: Bash runs in the foreground only — Run blocks until
+// the subprocess exits, so the model only sees the result after
+// completion. There is no background/async path.
 // R-JWIM-71UX: each invocation is bounded by bashTimeout (120s by
 // default). Setpgid puts the child in its own process group so a
 // timeout can SIGKILL the whole group (-pgid), tearing down any
 // grandchildren bash forked. On timeout Run returns an is_error
 // tool_result indicating the timeout.
-func Run(toolUseID, cmd string) (wire.ToolResultBlock, error) {
+// R-EBGD-2Z08: stdout and stderr are captured as separate streams
+// internally via io.MultiWriter; the combined buffer is rebuilt from
+// both streams and is what the model receives.
+func Run(toolUseID, cmd string) (RunResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), bashTimeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "bash", "-c", cmd)
@@ -70,16 +110,34 @@ func Run(toolUseID, cmd string) (wire.ToolResultBlock, error) {
 		}
 		return syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 	}
-	out, err := c.CombinedOutput()
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return wire.NewToolResultBlock(toolUseID, true,
+
+	// R-EBGD-2Z08: capture stdout and stderr into separate buffers
+	// while also writing both to a shared combined buffer whose byte
+	// order reflects true interleaving order via mutexWriter.
+	var combined mutexWriter
+	var stdoutBuf, stderrBuf bytes.Buffer
+	c.Stdout = io.MultiWriter(&combined, &stdoutBuf)
+	c.Stderr = io.MultiWriter(&combined, &stderrBuf)
+
+	runErr := c.Run()
+	interrupted := errors.Is(ctx.Err(), context.DeadlineExceeded)
+
+	stdout := capStream(stdoutBuf.String())
+	stderr := capStream(stderrBuf.String())
+
+	if interrupted {
+		block, err := wire.NewToolResultBlock(toolUseID, true,
 			fmt.Sprintf("Bash: command timed out after %s", bashTimeout))
+		return RunResult{Block: block, Stdout: stdout, Stderr: stderr, Interrupted: true}, err
 	}
-	if err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			return wire.NewToolResultBlock(toolUseID, true, fmt.Sprintf("Bash: %v", err))
+	if runErr != nil {
+		if _, ok := runErr.(*exec.ExitError); !ok {
+			block, err := wire.NewToolResultBlock(toolUseID, true, fmt.Sprintf("Bash: %v", runErr))
+			return RunResult{Block: block, Stdout: stdout, Stderr: stderr}, err
 		}
 	}
+
+	out := combined.buf.Bytes()
 	truncated := false
 	if len(out) > maxOutputBytes {
 		out = out[:maxOutputBytes]
@@ -92,7 +150,17 @@ func Run(toolUseID, cmd string) (wire.ToolResultBlock, error) {
 	} else {
 		body = fmt.Sprintf("%s\n[exit: %d]", string(out), c.ProcessState.ExitCode())
 	}
-	return wire.NewToolResultBlock(toolUseID, false, body)
+	block, err := wire.NewToolResultBlock(toolUseID, false, body)
+	return RunResult{Block: block, Stdout: stdout, Stderr: stderr}, err
+}
+
+// capStream caps a captured stream at maxOutputBytes to satisfy the
+// per-stream limit described in R-DPI6-73NQ.
+func capStream(s string) string {
+	if len(s) > maxOutputBytes {
+		return s[:maxOutputBytes]
+	}
+	return s
 }
 
 const maxOutputBytes = 30000

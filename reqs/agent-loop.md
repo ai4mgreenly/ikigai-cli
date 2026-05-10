@@ -51,4 +51,20 @@ This file is about the loop that ties them together.
   evolve. Without this orientation the model behaves as a
   chatbot rather than an agent: tool-use never fires and no
   iteration completes. Structured-output guidance is layered on
-  top of this baseline per R-WFWM-BKWX where applicable.
+  top of this baseline per R-WFWM-BKWX where applicable, with
+  the specific shape pinned by R-GA6J-9O0I.
+
+- R-GA6J-9O0I: the framing system prompt (R-8PF6-I8FP) must
+  instruct the model that its final answer is a single bare JSON
+  value — not wrapped in a markdown code fence, not preceded or
+  followed by explanatory prose, and with nothing after it. Exact
+  wording is an implementation choice; the load-bearing property
+  is that the instruction be present and unambiguous. Without it,
+  models that default to chat-style formatting (notably Gemini)
+  emit ```` ```json {...} ``` ```` and the structured-output
+  parser rejects every turn, driving each iteration into
+  R-WFWM-BKWX's bounded retries even when the JSON itself is
+  well-formed. The fix lives in the prompt rather than in a
+  fence-tolerant parser because tolerating fences would mask
+  further drift in what models emit; failing loudly at the parse
+  step keeps the contract honest.

@@ -40,6 +40,12 @@ var anthropicAliases = map[string]string{
 	"haiku":  "claude-haiku-4-5",
 }
 
+// googleAliases maps the documented Google short aliases to their
+// bare API IDs. R-XBYO-1ZI1, R-Y23Q-MNSU.
+var googleAliases = map[string]string{
+	"pro": "gemini-3.1-pro-preview",
+}
+
 // Resolve turns the raw --model value (a bare API ID or an alias)
 // into a Resolved pair. An empty value or unknown-prefix bare ID
 // returns a fatal startup error.
@@ -63,12 +69,15 @@ func Resolve(input string) (Resolved, error) {
 	}
 }
 
-// resolveAlias maps Anthropic short aliases (with optional [1m]
-// suffix) to their bare API IDs. Inputs that don't match an alias
-// pass through unchanged.
+// resolveAlias maps provider short aliases to their bare API IDs.
+// Anthropic aliases may carry a [1m] suffix that is preserved.
+// Inputs that don't match any alias pass through unchanged.
 func resolveAlias(in string) string {
 	stem, suffix := splitBracket(in)
 	if bare, ok := anthropicAliases[stem]; ok {
+		return bare + suffix
+	}
+	if bare, ok := googleAliases[stem]; ok {
 		return bare + suffix
 	}
 	return in

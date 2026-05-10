@@ -146,12 +146,11 @@ func Run(ctx context.Context, client provider.Client, sess *wire.Session, req pr
 	}
 }
 
-// dispatchTools dispatches every tool_use block in wireBlocks, emits the
-// corresponding tool_result user event via sess, and returns a new Request
-// with the assistant turn and tool-result user turn appended to history.
-// R-8293-8LCI.
+// dispatchTools dispatches every tool_use block in wireBlocks, emits one
+// user event per tool_result via sess (R-EW6N-L2M1), and returns a new
+// Request with the assistant turn and tool-result user turn appended to
+// history. R-8293-8LCI.
 func dispatchTools(ctx context.Context, sess *wire.Session, req provider.Request, wireBlocks []any, providerBlocks []provider.Block, tracer *trace.Tracer) (provider.Request, error) {
-	var resultWireBlocks []any
 	var resultProviderBlocks []provider.Block
 
 	for _, b := range wireBlocks {
@@ -161,13 +160,12 @@ func dispatchTools(ctx context.Context, sess *wire.Session, req provider.Request
 		}
 		// R-6EFF-GW25: trace tool dispatch before execution.
 		tracer.LogToolDispatch(tu.Name, tu.Input)
-		trWire, err := tools.Dispatch(ctx, tu)
+		trWire, sidecar, err := tools.Dispatch(ctx, tu)
 		if err != nil {
 			// Dispatch returns an is_error block on failure; a Go error here
 			// means NewToolResultBlock itself failed, which should never happen.
 			return provider.Request{}, fmt.Errorf("dispatch %s: %w", tu.Name, err)
 		}
-		resultWireBlocks = append(resultWireBlocks, trWire)
 
 		// Unmarshal the wire content (JSON-encoded string) to obtain the
 		// plain string that provider.ToolResultBlock.Content expects.
@@ -178,15 +176,24 @@ func dispatchTools(ctx context.Context, sess *wire.Session, req provider.Request
 		}
 		// R-6EFF-GW25: trace tool result after execution.
 		tracer.LogToolResult(tu.Name, trWire.IsError, contentStr)
+
+		// R-DPI6-73NQ / R-EW6N-L2M1: emit one user event per tool_result,
+		// attaching the tool-specific sidecar when the tool provides one.
+		var userEv wire.UserEvent
+		if sidecar != nil {
+			userEv = wire.NewUserEventWithSidecar(sidecar, trWire)
+		} else {
+			userEv = wire.NewUserEvent(trWire)
+		}
+		if err := sess.EmitUser(userEv); err != nil {
+			return provider.Request{}, err
+		}
+
 		resultProviderBlocks = append(resultProviderBlocks, provider.ToolResultBlock{
 			ToolUseID: trWire.ToolUseID,
 			Content:   contentStr,
 			IsError:   trWire.IsError,
 		})
-	}
-
-	if err := sess.EmitUser(wire.NewUserEvent(resultWireBlocks...)); err != nil {
-		return provider.Request{}, err
 	}
 
 	// Clone the message history and append the assistant turn (preserving
@@ -226,7 +233,13 @@ func drainTurn(events <-chan provider.Event) (wireBlocks []any, providerBlocks [
 			allText.WriteString(e.Text)
 		case provider.EventThinking:
 			flushText()
-			wireBlocks = append(wireBlocks, wire.NewThinkingBlock(e.Text))
+			// R-FPG8-RKEP: only forward thinking blocks with non-empty text to
+			// stdout. Signature-only events (empty Text) are history mechanics,
+			// not human-readable output; they stay in providerBlocks for
+			// round-trip but must not appear on the wire.
+			if e.Text != "" {
+				wireBlocks = append(wireBlocks, wire.NewThinkingBlock(e.Text))
+			}
 			providerBlocks = append(providerBlocks, provider.ThinkingBlock{Text: e.Text, Signature: e.Signature})
 		case provider.EventToolUse:
 			flushText()

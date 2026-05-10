@@ -278,6 +278,24 @@ func TestR_8PF6_I8FP_FramingPromptIsNonEmpty(t *testing.T) {
 	}
 }
 
+// R-GA6J-9O0I: the framing system prompt must instruct the model that
+// its final answer is a single bare JSON value — no markdown code
+// fence, no prose before or after it. This keeps models that default
+// to chat-style formatting from wrapping their output in ```json...```.
+func TestR_GA6J_9O0I_FramingPromptInstructsBareJSON(t *testing.T) {
+	p := strings.ToLower(FramingPrompt)
+	if !strings.Contains(p, "json") {
+		t.Error("FramingPrompt must mention JSON (R-GA6J-9O0I)")
+	}
+	if !strings.Contains(p, "fence") && !strings.Contains(p, "markdown") && !strings.Contains(p, "```") {
+		t.Error("FramingPrompt must reference markdown code fences so models know to omit them (R-GA6J-9O0I)")
+	}
+	// The instruction must prohibit prose around the JSON value.
+	if !strings.Contains(p, "bare") && !strings.Contains(p, "no surrounding") && !strings.Contains(p, "nothing before") {
+		t.Error("FramingPrompt must instruct the model to emit bare JSON with no surrounding prose (R-GA6J-9O0I)")
+	}
+}
+
 // R-8293-8LCI: when an assistant turn ends with tool_use, the agent
 // dispatches every tool_use block, emits a user event with tool_results,
 // appends both turns to history, and re-invokes the provider. The
@@ -426,6 +444,82 @@ func TestR_8293_8LCI_ToolRoundTripDispatchesToolsAndContinues(t *testing.T) {
 	}
 }
 
+// R-DPI6-73NQ: Bash tool_result user events carry a tool_use_result sidecar
+// with stdout, stderr, and interrupted fields. Verified by running a Bash
+// tool_use through the agent loop and asserting the user event on stdout
+// carries the correct top-level sidecar object.
+func TestR_DPI6_73NQ_BashSidecarInUserEvent(t *testing.T) {
+	toolInput, err := json.Marshal(map[string]string{
+		"command": "echo hello-stdout; echo hello-stderr 1>&2",
+	})
+	if err != nil {
+		t.Fatalf("marshal tool input: %v", err)
+	}
+
+	client := &sequenceClient{sequences: [][]provider.Event{
+		{
+			provider.EventToolUse{ID: "toolu_bash_01", Name: "Bash", Input: toolInput},
+			provider.EventDone{StopReason: "tool_use"},
+		},
+		{
+			provider.EventTextDelta{Text: `{"status":"DONE"}`},
+			provider.EventDone{StopReason: "end_turn"},
+		},
+	}}
+
+	var out bytes.Buffer
+	sess := wire.NewSession(&out)
+	if err := Run(context.Background(), client, sess, provider.Request{}, nil, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	lines := splitLines(out.String())
+	// Expected: assistant(tool_use), user(tool_result+sidecar), assistant(text), result
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 events, got %d: %q", len(lines), out.String())
+	}
+
+	// Line 1: user event must carry the Bash sidecar at top level.
+	var userEv struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+			} `json:"content"`
+		} `json:"message"`
+		ToolUseResult *struct {
+			Stdout      string `json:"stdout"`
+			Stderr      string `json:"stderr"`
+			Interrupted bool   `json:"interrupted"`
+		} `json:"tool_use_result"`
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &userEv); err != nil {
+		t.Fatalf("unmarshal user event: %v", err)
+	}
+	if userEv.Type != "user" {
+		t.Fatalf("line 1 type = %q, want user", userEv.Type)
+	}
+	if len(userEv.Message.Content) != 1 || userEv.Message.Content[0].Type != "tool_result" {
+		t.Fatalf("line 1 content = %+v, want one tool_result block", userEv.Message.Content)
+	}
+	if userEv.Message.Content[0].ToolUseID != "toolu_bash_01" {
+		t.Fatalf("tool_use_id = %q, want toolu_bash_01", userEv.Message.Content[0].ToolUseID)
+	}
+	if userEv.ToolUseResult == nil {
+		t.Fatal("tool_use_result sidecar must be present for Bash tool_result (R-DPI6-73NQ)")
+	}
+	if !strings.Contains(userEv.ToolUseResult.Stdout, "hello-stdout") {
+		t.Errorf("sidecar stdout = %q, want to contain hello-stdout", userEv.ToolUseResult.Stdout)
+	}
+	if !strings.Contains(userEv.ToolUseResult.Stderr, "hello-stderr") {
+		t.Errorf("sidecar stderr = %q, want to contain hello-stderr", userEv.ToolUseResult.Stderr)
+	}
+	if userEv.ToolUseResult.Interrupted {
+		t.Errorf("sidecar interrupted = true, want false for non-timed-out command")
+	}
+}
+
 // R-YSX3-4AE9: each backend populates the result event's usage,
 // total_cost_usd, num_turns, duration_ms, and modelUsage fields.
 // This test verifies the full data path: a provider emits EventUsage,
@@ -519,6 +613,223 @@ func TestR_YSX3_4AE9_BackendUsagePopulatesResultEvent(t *testing.T) {
 	}
 	if mu.CostUSD <= 0 {
 		t.Errorf("modelUsage costUSD = %v, want > 0", mu.CostUSD)
+	}
+}
+
+// R-FPG8-RKEP: thinking blocks with empty text must be filtered from stdout
+// but still preserved in provider history for round-trip. Non-empty thinking
+// blocks pass through normally.
+func TestR_FPG8_RKEP_EmptyThinkingBlocksFilteredFromStdout(t *testing.T) {
+	t.Run("empty_thinking_filtered", func(t *testing.T) {
+		client := &fakeClient{events: []provider.Event{
+			provider.EventThinking{Text: "", Signature: "sig-opaque"},
+			provider.EventTextDelta{Text: `{"status":"DONE"}`},
+			provider.EventDone{StopReason: "end_turn"},
+		}}
+
+		var out bytes.Buffer
+		sess := wire.NewSession(&out)
+		if err := Run(context.Background(), client, sess, provider.Request{}, nil, nil); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		lines := splitLines(out.String())
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 events (assistant + result), got %d: %q", len(lines), out.String())
+		}
+		var assistant struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []map[string]any `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(lines[0]), &assistant); err != nil {
+			t.Fatalf("unmarshal assistant: %v", err)
+		}
+		for _, block := range assistant.Message.Content {
+			if block["type"] == "thinking" {
+				t.Errorf("empty thinking block must not appear on stdout (R-FPG8-RKEP); got block: %v", block)
+			}
+		}
+	})
+
+	t.Run("nonempty_thinking_passes", func(t *testing.T) {
+		client := &fakeClient{events: []provider.Event{
+			provider.EventThinking{Text: "reasoning...", Signature: "sig-opaque"},
+			provider.EventTextDelta{Text: `{"status":"DONE"}`},
+			provider.EventDone{StopReason: "end_turn"},
+		}}
+
+		var out bytes.Buffer
+		sess := wire.NewSession(&out)
+		if err := Run(context.Background(), client, sess, provider.Request{}, nil, nil); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		lines := splitLines(out.String())
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 events, got %d", len(lines))
+		}
+		var assistant struct {
+			Type    string `json:"type"`
+			Message struct {
+				Content []map[string]any `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(lines[0]), &assistant); err != nil {
+			t.Fatalf("unmarshal assistant: %v", err)
+		}
+		var found bool
+		for _, block := range assistant.Message.Content {
+			if block["type"] == "thinking" {
+				found = true
+				if block["thinking"] == "" {
+					t.Errorf("thinking block must carry non-empty text when forwarded (R-FPG8-RKEP)")
+				}
+			}
+		}
+		if !found {
+			t.Error("non-empty thinking block must appear in assistant content (R-FPG8-RKEP)")
+		}
+	})
+}
+
+// R-EW6N-L2M1: when an assistant turn contains N tool_use blocks, ikigai-cli
+// emits exactly N user events on stdout, each carrying a single tool_result
+// block. Bash results carry a non-nil sidecar; Read results do not.
+func TestR_EW6N_L2M1_OneUserEventPerToolResult(t *testing.T) {
+	tmp := t.TempDir()
+	filePath := tmp + "/data.txt"
+	if err := os.WriteFile(filePath, []byte("file-content\n"), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	bashInput, err := json.Marshal(map[string]string{
+		"command": "printf sidecar-stdout",
+	})
+	if err != nil {
+		t.Fatalf("marshal bash input: %v", err)
+	}
+	readInput, err := json.Marshal(map[string]string{"file_path": filePath})
+	if err != nil {
+		t.Fatalf("marshal read input: %v", err)
+	}
+
+	// First provider call: assistant issues two tool_use blocks in one turn.
+	// Second provider call: model ends with structured output.
+	client := &sequenceClient{sequences: [][]provider.Event{
+		{
+			provider.EventToolUse{ID: "toolu_bash_01", Name: "Bash", Input: bashInput},
+			provider.EventToolUse{ID: "toolu_read_01", Name: "Read", Input: readInput},
+			provider.EventDone{StopReason: "tool_use"},
+		},
+		{
+			provider.EventTextDelta{Text: `{"status":"DONE"}`},
+			provider.EventDone{StopReason: "end_turn"},
+		},
+	}}
+
+	var out bytes.Buffer
+	sess := wire.NewSession(&out)
+	if err := Run(context.Background(), client, sess, provider.Request{}, nil, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("client.calls = %d, want 2", client.calls)
+	}
+
+	lines := splitLines(out.String())
+	// Expected: assistant(2 tool_uses), user(bash result), user(read result),
+	// assistant(text), result → 5 events.
+	if len(lines) != 5 {
+		t.Fatalf("expected 5 events, got %d:\n%s", len(lines), out.String())
+	}
+
+	// Line 0: assistant must carry exactly 2 tool_use blocks.
+	var assistantEv struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &assistantEv); err != nil {
+		t.Fatalf("unmarshal line 0: %v", err)
+	}
+	if assistantEv.Type != "assistant" {
+		t.Fatalf("line 0 type = %q, want assistant", assistantEv.Type)
+	}
+	if len(assistantEv.Message.Content) != 2 {
+		t.Fatalf("line 0 content length = %d, want 2 tool_use blocks", len(assistantEv.Message.Content))
+	}
+	for i, blk := range assistantEv.Message.Content {
+		if blk.Type != "tool_use" {
+			t.Errorf("line 0 content[%d].type = %q, want tool_use", i, blk.Type)
+		}
+	}
+
+	type userEvent struct {
+		Type    string `json:"type"`
+		Message struct {
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+			} `json:"content"`
+		} `json:"message"`
+		ToolUseResult *struct {
+			Stdout string `json:"stdout"`
+		} `json:"tool_use_result"`
+	}
+
+	// Lines 1 and 2: each must be a user event with exactly one tool_result.
+	wantIDs := []string{"toolu_bash_01", "toolu_read_01"}
+	wantSidecar := []bool{true, false}
+	for i, lineIdx := range []int{1, 2} {
+		var uev userEvent
+		if err := json.Unmarshal([]byte(lines[lineIdx]), &uev); err != nil {
+			t.Fatalf("unmarshal line %d: %v", lineIdx, err)
+		}
+		if uev.Type != "user" {
+			t.Fatalf("line %d type = %q, want user", lineIdx, uev.Type)
+		}
+		if len(uev.Message.Content) != 1 {
+			t.Fatalf("line %d content length = %d, want exactly 1 tool_result", lineIdx, len(uev.Message.Content))
+		}
+		blk := uev.Message.Content[0]
+		if blk.Type != "tool_result" {
+			t.Errorf("line %d content[0].type = %q, want tool_result", lineIdx, blk.Type)
+		}
+		if blk.ToolUseID != wantIDs[i] {
+			t.Errorf("line %d tool_use_id = %q, want %q", lineIdx, blk.ToolUseID, wantIDs[i])
+		}
+		hasSidecar := uev.ToolUseResult != nil
+		if hasSidecar != wantSidecar[i] {
+			t.Errorf("line %d sidecar present = %v, want %v", lineIdx, hasSidecar, wantSidecar[i])
+		}
+	}
+
+	// Lines 3 and 4: second assistant + result.
+	var assistantEv2 struct{ Type string `json:"type"` }
+	if err := json.Unmarshal([]byte(lines[3]), &assistantEv2); err != nil {
+		t.Fatalf("unmarshal line 3: %v", err)
+	}
+	if assistantEv2.Type != "assistant" {
+		t.Fatalf("line 3 type = %q, want assistant", assistantEv2.Type)
+	}
+	var resultEv struct {
+		Type    string `json:"type"`
+		IsError bool   `json:"is_error"`
+	}
+	if err := json.Unmarshal([]byte(lines[4]), &resultEv); err != nil {
+		t.Fatalf("unmarshal line 4: %v", err)
+	}
+	if resultEv.Type != "result" {
+		t.Fatalf("line 4 type = %q, want result", resultEv.Type)
+	}
+	if resultEv.IsError {
+		t.Fatal("result is_error = true, want false")
 	}
 }
 

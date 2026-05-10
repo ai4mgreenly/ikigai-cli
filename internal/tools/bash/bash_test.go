@@ -26,11 +26,11 @@ func TestR_JBSB_OY94_BashForegroundOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.IsError {
+	if res.Block.IsError {
 		t.Fatalf("IsError = true; want false")
 	}
 	var content string
-	if err := json.Unmarshal(res.Content, &content); err != nil {
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if !strings.Contains(content, "done") {
@@ -56,11 +56,11 @@ func TestR_JWIM_71UX_BashTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !res.IsError {
+	if !res.Block.IsError {
 		t.Fatalf("IsError = false; want true on timeout")
 	}
 	var content string
-	if err := json.Unmarshal(res.Content, &content); err != nil {
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if !strings.Contains(strings.ToLower(content), "timed out") {
@@ -79,17 +79,17 @@ func TestR_IR21_6UNB_BashCombinedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.Type != "tool_result" {
-		t.Fatalf("Type = %q, want tool_result", res.Type)
+	if res.Block.Type != "tool_result" {
+		t.Fatalf("Type = %q, want tool_result", res.Block.Type)
 	}
-	if res.ToolUseID != useID {
-		t.Fatalf("ToolUseID = %q, want %q", res.ToolUseID, useID)
+	if res.Block.ToolUseID != useID {
+		t.Fatalf("ToolUseID = %q, want %q", res.Block.ToolUseID, useID)
 	}
-	if res.IsError {
+	if res.Block.IsError {
 		t.Fatalf("IsError = true; want false for successful command")
 	}
 	var content string
-	if err := json.Unmarshal(res.Content, &content); err != nil {
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if !strings.Contains(content, "hello-out") || !strings.Contains(content, "hello-err") {
@@ -105,11 +105,11 @@ func TestR_LBQE_9F03_BashExitCodeInBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.IsError {
+	if res.Block.IsError {
 		t.Fatalf("IsError = true; non-zero exit must not set is_error")
 	}
 	var content string
-	if err := json.Unmarshal(res.Content, &content); err != nil {
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if !strings.Contains(content, "before-exit") {
@@ -124,7 +124,7 @@ func TestR_LBQE_9F03_BashExitCodeInBody(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	var content2 string
-	if err := json.Unmarshal(res2.Content, &content2); err != nil {
+	if err := json.Unmarshal(res2.Block.Content, &content2); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if !strings.Contains(content2, "[exit: 0]") {
@@ -143,11 +143,11 @@ func TestR_KM4I_88FI_BashRunsInSessionCwd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.IsError {
+	if res.Block.IsError {
 		t.Fatalf("IsError = true; want false")
 	}
 	var content string
-	if err := json.Unmarshal(res.Content, &content); err != nil {
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	wd, err := os.Getwd()
@@ -173,11 +173,11 @@ func TestR_LXOL_5ACL_BashOutputTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if res.IsError {
+	if res.Block.IsError {
 		t.Fatalf("IsError = true; want false")
 	}
 	var content string
-	if err := json.Unmarshal(res.Content, &content); err != nil {
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if !strings.Contains(content, "[truncated:") {
@@ -198,10 +198,61 @@ func TestR_LXOL_5ACL_BashOutputTruncated(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	var content2 string
-	if err := json.Unmarshal(res2.Content, &content2); err != nil {
+	if err := json.Unmarshal(res2.Block.Content, &content2); err != nil {
 		t.Fatalf("unmarshal content: %v", err)
 	}
 	if strings.Contains(content2, "[truncated:") {
 		t.Fatalf("short output should not carry truncation notice; got %q", content2)
+	}
+}
+
+// R-EBGD-2Z08: Bash captures stdout and stderr as separate streams
+// internally while the model-facing content remains their combination.
+// Verified by running a command that emits distinct strings to each
+// stream and asserting (a) the combined content contains both, (b)
+// RunResult.Stdout contains only the stdout string, (c)
+// RunResult.Stderr contains only the stderr string, and (d) neither
+// stream bleeds into the other.
+func TestR_EBGD_2Z08_BashSeparateStreamCapture(t *testing.T) {
+	const useID = "toolu_bash_split"
+	res, err := bash.Run(useID, "echo only-stdout; echo only-stderr 1>&2")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Block.IsError {
+		t.Fatalf("Block.IsError = true; want false")
+	}
+
+	// Combined model-facing content must contain both strings.
+	var content string
+	if err := json.Unmarshal(res.Block.Content, &content); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if !strings.Contains(content, "only-stdout") {
+		t.Errorf("combined content missing stdout string; got %q", content)
+	}
+	if !strings.Contains(content, "only-stderr") {
+		t.Errorf("combined content missing stderr string; got %q", content)
+	}
+
+	// Stdout stream must contain only the stdout string.
+	if !strings.Contains(res.Stdout, "only-stdout") {
+		t.Errorf("Stdout missing stdout string; got %q", res.Stdout)
+	}
+	if strings.Contains(res.Stdout, "only-stderr") {
+		t.Errorf("Stdout must not contain stderr string; got %q", res.Stdout)
+	}
+
+	// Stderr stream must contain only the stderr string.
+	if !strings.Contains(res.Stderr, "only-stderr") {
+		t.Errorf("Stderr missing stderr string; got %q", res.Stderr)
+	}
+	if strings.Contains(res.Stderr, "only-stdout") {
+		t.Errorf("Stderr must not contain stdout string; got %q", res.Stderr)
+	}
+
+	// Interrupted must be false for a successful command.
+	if res.Interrupted {
+		t.Errorf("Interrupted = true; want false for successful command")
 	}
 }

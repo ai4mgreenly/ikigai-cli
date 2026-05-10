@@ -90,14 +90,38 @@ about.
   `includeThoughts: true`) emit no thinking blocks; that's
   acceptable.
 
+- R-FPG8-RKEP: `thinking` content blocks emitted on stdout MUST
+  carry non-empty `thinking` text. Some providers raise thinking
+  events whose only payload is provider-internal reasoning state
+  needed to round-trip the next request — Google's
+  `thoughtSignature` (providers.md R-P1V4-NTDY) and OpenAI's
+  reasoning-item `encrypted_content` (providers.md R-3D9Z-4ND7).
+  Those signature-only events are conversation-history mechanics,
+  not human-readable thinking; surfacing them as
+  `{"type":"thinking","thinking":""}` adds noise to the operator's
+  transcript and contradicts the provider-level requirements that
+  thinking summaries not be surfaced (R-QKQL-VHR7 for Google,
+  R-4JYG-IMBI for OpenAI). They must be filtered before stdout
+  while still being preserved in the provider conversation history
+  so the next request can replay them.
+
 ## Stdout: `user` events
 
-- R-YLQR-3Z46: tool execution results appear as `user` events of
+- R-EW6N-L2M1: tool execution results appear as `user` events of
   shape
   `{"type":"user","message":{"role":"user","content":[<blocks>]}}`,
   emitted by ikigai-cli (not received from a real user) after each
-  tool runs. ikigai-cli emits one user event per assistant turn
-  that contained one or more tool_use blocks.
+  tool runs. ikigai-cli emits exactly one `user` event per
+  `tool_result` block: when an assistant turn contains N
+  `tool_use` blocks, ikigai-cli emits N user events on stdout,
+  each carrying a single `tool_result` content block in
+  `message.content` (and its R-CZWA-5X35 sidecar where the tool
+  has one). One event per result keeps the per-tool sidecar
+  unambiguously paired with its block and matches the real
+  `claude` binary's emission pattern; downstream renderers
+  (notably ralph-loops') key off that pairing. Replaces and
+  retires R-YLQR-3Z46, whose per-turn batching could not express
+  multi-tool sidecars in the Claude Code wire shape.
 
 - R-Z6H1-M2PZ: each tool result is a content block of shape
   `{"type":"tool_result","tool_use_id":"<id>","is_error":<bool>,"content":<json-value>}`.
@@ -106,6 +130,22 @@ about.
   `true` when the tool failed (per tools.md R-ZUM3-QUVT) and
   `false` otherwise. `content` may be a string, a structured JSON
   value, or null.
+
+- R-CZWA-5X35: a `user` event carrying a `tool_result` block MAY
+  also carry a top-level `tool_use_result` field — a sidecar
+  alongside `message`, not nested inside it — whose value is the
+  tool-specific Claude Code CLI sidecar shape. Tools whose
+  Claude Code counterpart emits a sidecar populate it (Bash:
+  see tools.md R-DPI6-73NQ); tools whose Claude Code counterpart
+  does not omit the field entirely. The sidecar exists so
+  downstream renderers can present a tool_result faithfully —
+  e.g. distinguishing stderr from stdout for Bash — without
+  re-parsing the model-facing combined `content` string. This is
+  Claude Code wire-format parity: the field is part of the real
+  `claude` binary's stream-json output that ralph-loops already
+  consumes for Claude-driven runs, so omitting it for ikigai-cli
+  runs makes the same renderer behave differently depending on
+  the engine.
 
 - R-ZUV1-9HJV: ralph-loops echoes its own user input back as a
   `user` event with `{"type":"text","text":"..."}` content blocks
@@ -179,10 +219,14 @@ about.
   id.
 
 - R-5ZKU-HYRK: every `tool_use` block emitted in an assistant
-  event MUST be answered by exactly one `tool_result` block in the
-  next user event ikigai-cli emits, with matching `tool_use_id`,
-  before the iteration's `result` event. ikigai-cli must not emit
-  a `result` while there are unanswered tool calls pending.
+  event MUST be answered by exactly one `tool_result` block —
+  carried in one of the `user` events ikigai-cli emits before the
+  iteration's `result` event, with matching `tool_use_id`.
+  Whether those answers arrive bundled in one user event or one
+  per event is governed by R-EW6N-L2M1; the invariant here is
+  the answered-exactly-once-before-result obligation. ikigai-cli
+  must not emit a `result` while there are unanswered tool calls
+  pending.
 
 ## Out of contract
 

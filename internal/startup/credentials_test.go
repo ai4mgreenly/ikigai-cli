@@ -115,6 +115,71 @@ func TestR_857T_2AX4_ProviderSelectionDrivesCredentialSelection(t *testing.T) {
 	})
 }
 
+// R-KIGL-EK0W: missing GOOGLE_API_KEY is a fatal startup error when the
+// Google backend is selected; the key is sent as x-goog-api-key header.
+func TestR_KIGL_EK0W_MissingGoogleKeyIsFatalStartupError(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+	}{
+		{"unset", ""},
+		{"empty", ""},
+		{"whitespace", "   \t\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := func(k string) string {
+				if k == GoogleKeyEnv {
+					return tc.val
+				}
+				return ""
+			}
+			err := requireGoogleKey(env)
+			if err == nil {
+				t.Fatalf("expected error when %s is %q, got nil", GoogleKeyEnv, tc.val)
+			}
+			if !strings.Contains(err.Error(), GoogleKeyEnv) {
+				t.Fatalf("error must name the missing env var %q; got %q", GoogleKeyEnv, err.Error())
+			}
+		})
+	}
+
+	t.Run("present", func(t *testing.T) {
+		env := func(k string) string {
+			if k == GoogleKeyEnv {
+				return "AIzaSy-test-key"
+			}
+			return ""
+		}
+		if err := requireGoogleKey(env); err != nil {
+			t.Fatalf("unexpected error with key set: %v", err)
+		}
+	})
+
+	t.Run("google_key_absent_errors_naming_google_var", func(t *testing.T) {
+		env := func(k string) string { return "" }
+		err := requireCredential("google", env)
+		if err == nil {
+			t.Fatal("expected error when GOOGLE_API_KEY absent, got nil")
+		}
+		if !strings.Contains(err.Error(), GoogleKeyEnv) {
+			t.Errorf("error must name %q; got %q", GoogleKeyEnv, err.Error())
+		}
+	})
+
+	t.Run("google_key_present_ok", func(t *testing.T) {
+		env := func(k string) string {
+			if k == GoogleKeyEnv {
+				return "AIzaSy-test-key"
+			}
+			return ""
+		}
+		if err := requireCredential("google", env); err != nil {
+			t.Errorf("unexpected error when GOOGLE_API_KEY set: %v", err)
+		}
+	})
+}
+
 // R-YL2Y-7HXQ: missing ANTHROPIC_API_KEY is a fatal startup error
 // for the MVP (Anthropic-only) provider surface.
 func TestR_YL2Y_7HXQ_MissingAnthropicKeyIsFatalStartupError(t *testing.T) {
