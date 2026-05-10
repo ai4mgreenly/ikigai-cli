@@ -833,6 +833,73 @@ func TestR_EW6N_L2M1_OneUserEventPerToolResult(t *testing.T) {
 	}
 }
 
+// capturingClient records every provider.Request passed to Stream.
+type capturingClient struct {
+	sequences        [][]provider.Event
+	calls            int
+	capturedRequests []provider.Request
+}
+
+func (c *capturingClient) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	c.capturedRequests = append(c.capturedRequests, req)
+	if c.calls >= len(c.sequences) {
+		return nil, &provider.Error{Kind: provider.ErrUnknown, Msg: "capturingClient exhausted"}
+	}
+	evs := c.sequences[c.calls]
+	c.calls++
+	ch := make(chan provider.Event, len(evs))
+	for _, ev := range evs {
+		ch <- ev
+	}
+	close(ch)
+	return ch, nil
+}
+
+// R-XQHM-7TKL: when Run is called with req.ResponseSchema set, that schema
+// must be present in every client.Stream call — including tool-result
+// follow-ups — so provider-native structured-output mode stays engaged for
+// the entire iteration.
+func TestR_XQHM_7TKL_ResponseSchemaForwardedOnEveryStreamCall(t *testing.T) {
+	rawSchema := json.RawMessage(`{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}`)
+
+	bashInput, err := json.Marshal(map[string]string{"command": "echo hi"})
+	if err != nil {
+		t.Fatalf("marshal tool input: %v", err)
+	}
+
+	// Two-call sequence: first ends with tool_use, second ends with end_turn.
+	// Both calls must carry ResponseSchema unchanged.
+	client := &capturingClient{sequences: [][]provider.Event{
+		{
+			provider.EventToolUse{ID: "toolu_01", Name: "Bash", Input: bashInput},
+			provider.EventDone{StopReason: "tool_use"},
+		},
+		{
+			provider.EventTextDelta{Text: `{"status":"done"}`},
+			provider.EventDone{StopReason: "end_turn"},
+		},
+	}}
+
+	var out bytes.Buffer
+	sess := wire.NewSession(&out)
+	req := provider.Request{ResponseSchema: rawSchema}
+
+	if err := Run(context.Background(), client, sess, req, nil, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("client.calls = %d, want 2", client.calls)
+	}
+	if len(client.capturedRequests) != 2 {
+		t.Fatalf("captured %d requests, want 2", len(client.capturedRequests))
+	}
+	for i, captured := range client.capturedRequests {
+		if string(captured.ResponseSchema) != string(rawSchema) {
+			t.Errorf("Stream call %d: ResponseSchema = %q, want %q", i, captured.ResponseSchema, rawSchema)
+		}
+	}
+}
+
 func splitLines(s string) []string {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {

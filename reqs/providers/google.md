@@ -410,6 +410,50 @@ billed per request and is not modeled in the registry.
 
 [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
+## 12. Markdown fence handling
+
+Gemini wraps structured free-form output (JSON, code, single-line
+status payloads) in markdown code fences with high frequency, even
+against an explicit "raw output" instruction in the prompt. There is
+no documented `generationConfig` parameter to suppress this in
+free-form mode; the `responseJsonSchema` mode (§ structured output,
+`../providers.md` R-PP17-XGH5) does guarantee fence-free output but
+applies only when a schema is supplied.
+
+For the un-schema'd free-form case ikigai-cli applies two layers per
+`../providers.md` R-K8MR-FN4P and R-2WLP-5VTQ:
+
+1. **Prompt augmentation** — append a fixed sentence to
+   `systemInstruction` instructing the model to emit raw text with
+   no fences. Soft signal; reduces but does not eliminate fences.
+
+2. **Outer-fence stripping** — at the boundary where the assistant
+   turn's accumulated text becomes a stdout `TextBlock`, detect the
+   shape
+
+   ```
+   ```<lang?>
+   <body>
+   ```
+   ```
+
+   wrapping the entire payload (first non-whitespace line opens,
+   last non-whitespace line closes, no other unbalanced fence
+   between) and emit `<body>` in place of the original text.
+   Mixed prose-and-fence, multiple top-level fences, and
+   unbalanced fences are emitted unchanged — only the unambiguous
+   "the whole response is a fenced block" case is rewritten.
+
+Both layers run unconditionally — they are NOT skipped when
+`responseJsonSchema` is in effect. Empirically, Gemini's
+structured-output mode does not bind output cleanly when
+function-calling tools are also active in the same request
+(the documented schema-plus-tools interaction), and ralph's
+iterations always combine schema with tools. Under genuine
+fence-free structured-output mode the strip pass is a no-op
+anyway, so always-running is both safer and simpler than
+conditional gating.
+
 ## Notes / unconfirmed
 
 - Whether a date-stamped variant like

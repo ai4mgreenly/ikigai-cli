@@ -160,8 +160,11 @@ func TestR_RTUW_106W_SystemPromptViaSystemInstruction(t *testing.T) {
 		t.Fatalf("systemInstruction.parts len = %d, want 1", len(parts))
 	}
 	p, _ := parts[0].(map[string]any)
-	if p["text"] != "You are a helpful assistant." {
-		t.Errorf("systemInstruction.parts[0].text = %v, want %q", p["text"], "You are a helpful assistant.")
+	// R-RTUW-106W: system prompt must appear in systemInstruction text.
+	// R-K8MR-FN4P: the anti-fence directive is appended when no schema is set,
+	// so we verify the prompt is a prefix of the full text rather than exact.
+	if got, ok := p["text"].(string); !ok || !strings.HasPrefix(got, "You are a helpful assistant.") {
+		t.Errorf("systemInstruction.parts[0].text = %v, want prefix %q", p["text"], "You are a helpful assistant.")
 	}
 
 	// Verify no systemInstruction-style content appears in contents.
@@ -702,5 +705,150 @@ func TestR_UFR5_HCAD_InStreamErrorChunkDetection(t *testing.T) {
 	// No EventDone should be emitted after an in-stream error.
 	if gotDone {
 		t.Error("EventDone emitted after in-stream error; want no EventDone")
+	}
+}
+
+// TestR_K8MR_FN4P_AntiFenceSystemPromptAugmentation verifies that the anti-fence
+// directive is appended to systemInstruction when responseJsonSchema is not set,
+// and omitted when it is. When no system prompt is supplied and no schema, the
+// directive alone forms systemInstruction. R-K8MR-FN4P.
+func TestR_K8MR_FN4P_AntiFenceSystemPromptAugmentation(t *testing.T) {
+	capture := func(t *testing.T, req provider.Request) map[string]any {
+		t.Helper()
+		var body map[string]any
+		c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode: %v", err)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			sseChunk(w, finalChunk("STOP", 5, 3))
+		})
+		ch, err := c.Stream(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		drainEvents(t, ch)
+		return body
+	}
+
+	sysText := func(body map[string]any) string {
+		si, _ := body["systemInstruction"].(map[string]any)
+		parts, _ := si["parts"].([]any)
+		if len(parts) == 0 {
+			return ""
+		}
+		p, _ := parts[0].(map[string]any)
+		return fmt.Sprintf("%v", p["text"])
+	}
+
+	const directive = "Output raw text only. Do not wrap your response in markdown code fences."
+
+	// No system prompt, no schema: directive alone.
+	body := capture(t, provider.Request{})
+	got := sysText(body)
+	if got != directive {
+		t.Errorf("no prompt, no schema: systemInstruction text = %q, want directive %q", got, directive)
+	}
+
+	// System prompt present, no schema: prompt + newline + directive.
+	body = capture(t, provider.Request{SystemPrompt: "Be helpful."})
+	got = sysText(body)
+	want := "Be helpful.\n" + directive
+	if got != want {
+		t.Errorf("with prompt, no schema: systemInstruction text = %q, want %q", got, want)
+	}
+
+	// No system prompt, schema set: no systemInstruction.
+	schema := json.RawMessage(`{"type":"object"}`)
+	body = capture(t, provider.Request{ResponseSchema: schema})
+	if _, ok := body["systemInstruction"]; ok {
+		t.Error("schema set, no prompt: systemInstruction must not be present")
+	}
+
+	// System prompt present, schema set: prompt only, no directive.
+	body = capture(t, provider.Request{SystemPrompt: "Be helpful.", ResponseSchema: schema})
+	got = sysText(body)
+	if got != "Be helpful." {
+		t.Errorf("with prompt and schema: systemInstruction text = %q, want %q", got, "Be helpful.")
+	}
+	if strings.Contains(got, directive) {
+		t.Error("directive must not appear when responseJsonSchema is set")
+	}
+}
+
+// TestR_2WLP_5VTQ_OuterFenceStripping verifies that a single markdown code fence
+// wrapping the entire text response is stripped at the Google provider boundary,
+// and that prose-mixed, multi-fence, unbalanced, and schema-set cases are left
+// unchanged. R-2WLP-5VTQ.
+func TestR_2WLP_5VTQ_OuterFenceStripping(t *testing.T) {
+	streamText := func(t *testing.T, chunks []string, schema json.RawMessage) string {
+		t.Helper()
+		c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			for _, ch := range chunks {
+				sseChunk(w, textChunk(ch))
+			}
+			sseChunk(w, finalChunk("STOP", 10, 5))
+		})
+		ch, err := c.Stream(context.Background(), provider.Request{ResponseSchema: schema})
+		if err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		text, _, _, _, _, _ := drainEvents(t, ch)
+		return text
+	}
+
+	// Simple fence with lang tag: stripped; trailing newline before closing fence preserved.
+	got := streamText(t, []string{"```json\n{\"k\":\"v\"}\n```"}, nil)
+	if got != "{\"k\":\"v\"}\n" {
+		t.Errorf("simple json fence: got %q, want %q", got, "{\"k\":\"v\"}\n")
+	}
+
+	// Fence split across streaming chunks: stripped, trailing newline preserved.
+	got = streamText(t, []string{"```python\n", "x = 1\n", "```"}, nil)
+	if got != "x = 1\n" {
+		t.Errorf("split-chunk fence: got %q, want %q", got, "x = 1\n")
+	}
+
+	// No fence: plain text unchanged.
+	got = streamText(t, []string{"hello world"}, nil)
+	if got != "hello world" {
+		t.Errorf("no fence: got %q, want %q", got, "hello world")
+	}
+
+	// Fence with no lang tag (bare ```): stripped, trailing newline preserved.
+	got = streamText(t, []string{"```\nraw content\n```"}, nil)
+	if got != "raw content\n" {
+		t.Errorf("bare fence: got %q, want %q", got, "raw content\n")
+	}
+
+	// Mixed prose-and-fence: not stripped (prose on first non-whitespace line).
+	got = streamText(t, []string{"intro\n```\ncode\n```"}, nil)
+	if got != "intro\n```\ncode\n```" {
+		t.Errorf("mixed prose: got %q, want %q", got, "intro\n```\ncode\n```")
+	}
+
+	// Unbalanced fence in body: not stripped.
+	// Text = "```\nfoo\n```\nunclosed\n```"
+	// Outer: first="```", last="```"; body = ["foo", "```", "unclosed"].
+	// Balance: "```" opens (inFence=true), "unclosed" not a fence → inFence=true at end → unbalanced.
+	got = streamText(t, []string{"```\nfoo\n```\nunclosed\n```"}, nil)
+	if got != "```\nfoo\n```\nunclosed\n```" {
+		t.Errorf("unbalanced inner: got %q, want unchanged", got)
+	}
+
+	// Nested balanced fence in body: outer stripped, inner preserved with trailing newline.
+	got = streamText(t, []string{"```\n```python\ncode\n```\n```"}, nil)
+	if got != "```python\ncode\n```\n" {
+		t.Errorf("nested balanced: got %q, want %q", got, "```python\ncode\n```\n")
+	}
+
+	// Schema set: no stripping.
+	schema := json.RawMessage(`{"type":"object"}`)
+	got = streamText(t, []string{"```json\n{\"k\":\"v\"}\n```"}, schema)
+	if got != "```json\n{\"k\":\"v\"}\n```" {
+		t.Errorf("schema set: got %q, want unchanged", got)
 	}
 }

@@ -6,7 +6,11 @@ import (
 	"fmt"
 
 	"github.com/ai4mgreenly/ikigai-cli/internal/tools/bash"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/edit"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/glob"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/grep"
 	"github.com/ai4mgreenly/ikigai-cli/internal/tools/read"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/write"
 	"github.com/ai4mgreenly/ikigai-cli/internal/wire"
 )
 
@@ -45,6 +49,49 @@ func Dispatch(_ context.Context, block wire.ToolUseBlock) (wire.ToolResultBlock,
 			return b, nil, e
 		}
 		b, e := read.Read(block.ID, in.FilePath, in.Offset, in.Limit)
+		return b, nil, e
+	case write.Name:
+		var in struct {
+			FilePath string `json:"file_path"`
+			Content  string `json:"content"`
+		}
+		if err := json.Unmarshal(block.Input, &in); err != nil {
+			b, e := wire.NewToolResultBlock(block.ID, true, fmt.Sprintf("Write: invalid input: %v", err))
+			return b, nil, e
+		}
+		b, e := write.Write(block.ID, in.FilePath, in.Content)
+		return b, nil, e
+	case glob.Name:
+		var in struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if err := json.Unmarshal(block.Input, &in); err != nil {
+			b, e := wire.NewToolResultBlock(block.ID, true, fmt.Sprintf("Glob: invalid input: %v", err))
+			return b, nil, e
+		}
+		b, e := glob.Glob(block.ID, in.Pattern, in.Path)
+		return b, nil, e
+	case grep.Name:
+		var in grep.Input
+		if err := json.Unmarshal(block.Input, &in); err != nil {
+			b, e := wire.NewToolResultBlock(block.ID, true, fmt.Sprintf("Grep: invalid input: %v", err))
+			return b, nil, e
+		}
+		b, e := grep.Grep(block.ID, in)
+		return b, nil, e
+	case edit.Name:
+		var in struct {
+			FilePath   string `json:"file_path"`
+			OldString  string `json:"old_string"`
+			NewString  string `json:"new_string"`
+			ReplaceAll bool   `json:"replace_all"`
+		}
+		if err := json.Unmarshal(block.Input, &in); err != nil {
+			b, e := wire.NewToolResultBlock(block.ID, true, fmt.Sprintf("Edit: invalid input: %v", err))
+			return b, nil, e
+		}
+		b, e := edit.Edit(block.ID, in.FilePath, in.OldString, in.NewString, in.ReplaceAll)
 		return b, nil, e
 	default:
 		b, e := wire.NewToolResultBlock(block.ID, true, fmt.Sprintf("unknown tool: %q", block.Name))

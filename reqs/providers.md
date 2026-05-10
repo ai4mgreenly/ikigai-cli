@@ -473,6 +473,67 @@ lives at `providers/openai.md`.
   R-R7WP-54UE's error-taxonomy mapping, terminating the
   iteration per R-E2W7-K5JB.
 
+- R-K8MR-FN4P: anti-fence system-prompt augmentation. Gemini
+  has a strong learned tendency to wrap structured free-form
+  output (JSON, code, single-line status payloads) in markdown
+  code fences (```` ```json … ``` ````, ```` ``` … ``` ````)
+  even when the surrounding prompt asks for raw output. The
+  Google backend mitigates this by appending a fixed directive
+  to whatever R-RTUW-106W carries in `systemInstruction`,
+  instructing the model to emit raw text with no markdown code
+  fences and no surrounding prose. When the operator supplies
+  no system prompt, the directive alone forms the
+  `systemInstruction`. The directive is appended unconditionally
+  — including when `responseJsonSchema` is set per R-PP17-XGH5 —
+  because Google does not enforce structured-output cleanly when
+  tools are also active in the same request (see
+  providers/google.md §12), and ralph's iterations always
+  combine schema with tools. This is a soft signal — Gemini
+  frequently ignores formatting prose — so it must be paired
+  with R-2WLP-5VTQ; the directive exists to reduce the rate at
+  which the strip pass has work to do, not to replace it.
+
+- R-2WLP-5VTQ: outer-fence stripping at the Google output
+  boundary. Before the consolidated `TextBlock` for an
+  assistant turn is emitted to stdout per R-ZRRF-LGW1, the
+  Google backend inspects the accumulated text for a single
+  markdown code fence wrapping the entire payload. The pattern
+  recognized is: an opening fence (```` ``` ```` optionally
+  followed by a language tag matching `[A-Za-z0-9_+-]+`) on
+  the first non-whitespace line of the payload, a closing
+  fence (```` ``` ```` alone) on the last non-whitespace line,
+  and no other unbalanced fence in between. When matched, the
+  outer fence pair is removed and the body is emitted in place
+  of the original text — interior whitespace, interior nested
+  fences, and trailing newlines inside the body are preserved
+  verbatim. When not matched — mixed prose-and-fence, multiple
+  top-level fences, unbalanced fences, no fence at all — the
+  text is emitted unchanged. The pass runs unconditionally,
+  including when `responseJsonSchema` is set per R-PP17-XGH5,
+  because Google's structured-output mode does not bind cleanly
+  when tools are also active in the same request (see
+  providers/google.md §12), and the strip pass is conservative
+  enough that under genuine fence-free structured output it is
+  a no-op anyway. The pass runs only against text content;
+  `functionCall` parts are unaffected. This is the
+  Google-specific instance of R-3959-U3A3 — normalization at
+  the provider seam keeps the stdout stream-json shape uniform
+  across providers despite Gemini's wrapping tendency. As of
+  2026-05-10 the Generative Language API exposes no documented
+  `generationConfig` knob that suppresses fence-wrapping in
+  free-form (un-schema'd) text output, and the
+  `responseJsonSchema` mode does not reliably suppress it when
+  tools are present; if Google adds a stricter knob or fixes
+  the schema-plus-tools interaction in a future API version
+  this requirement should be revisited. Tension acknowledged
+  with agent-loop.md R-GA6J-9O0I, which prefers prompt-side
+  loud failure over fence-tolerant parsing on principle: this
+  Google-only stripping is justified by the schema's empirical
+  inability to bind output in the schema-plus-tools case, and
+  the provider-internal nature of the rewrite (downstream
+  consumers see the same wire shape they would have seen had
+  Gemini honored the schema in the first place).
+
 The implementation-grade wire reference for the Google backend
 lives at `providers/google.md`.
 

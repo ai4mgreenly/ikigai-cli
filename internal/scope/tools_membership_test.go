@@ -29,13 +29,13 @@ func TestR_AQ6C_0C5B_ToolsMembership(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := []string{"bash", "read"}
+	want := []string{"bash", "edit", "glob", "grep", "read", "write"}
 	if len(got) != len(want) {
-		t.Fatalf("internal/tools: got subdirs %v, want %v (R-AQ6C-0C5B: v1 is Read + Bash only)", got, want)
+		t.Fatalf("internal/tools: got subdirs %v, want %v (R-AQ6C-0C5B / v1.x: Read + Bash + Write + Edit + Glob + Grep)", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("internal/tools: got subdirs %v, want %v (R-AQ6C-0C5B: v1 is Read + Bash only)", got, want)
+			t.Fatalf("internal/tools: got subdirs %v, want %v (R-AQ6C-0C5B / v1.x: Read + Bash + Write + Edit + Glob + Grep)", got, want)
 		}
 	}
 }

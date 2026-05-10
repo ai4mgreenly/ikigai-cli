@@ -299,13 +299,17 @@ are explicitly not part of the target audience.
   regardless of how the underlying provider represented them on the
   wire.
 
-- R-AQ6C-0C5B: v1 implements exactly two tools — Read and Bash —
-  and offers both to the model on every request. The model can
-  perform writes, edits, file discovery, and content search via
-  shell commands at a token-cost premium; expanding the tool set
-  is a v1.x decision once the agent loop is proven end-to-end.
-  Additional tools listed in `tools.md` ship in later versions,
-  not v1.
+- R-AQ6C-0C5B: v1 shipped exactly two tools — Read and Bash —
+  and offered both to the model on every request, with the model
+  performing writes, edits, file discovery, and content search
+  via shell commands at a token-cost premium. With the agent
+  loop proven end-to-end, v1.x expands the tool surface one
+  tool at a time in the order Write, Edit, Glob, Grep. Each
+  addition is specified in `tools.md` and offered to the model
+  on every request once shipped; the membership test in
+  `internal/scope/tools_membership_test.go` is the mechanical
+  gate that keeps the tools directory and the requirements in
+  lockstep.
 
 ## Stack constraints
 

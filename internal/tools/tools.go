@@ -14,7 +14,11 @@ import (
 	"strings"
 
 	"github.com/ai4mgreenly/ikigai-cli/internal/tools/bash"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/edit"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/glob"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/grep"
 	"github.com/ai4mgreenly/ikigai-cli/internal/tools/read"
+	"github.com/ai4mgreenly/ikigai-cli/internal/tools/write"
 )
 
 // Descriptor is the model-facing advertisement of a tool: its
@@ -30,6 +34,10 @@ func All() []Descriptor {
 	return []Descriptor{
 		{Name: read.Name, InputSchema: read.InputSchema},
 		{Name: bash.Name, InputSchema: bash.InputSchema},
+		{Name: write.Name, InputSchema: write.InputSchema},
+		{Name: edit.Name, InputSchema: edit.InputSchema},
+		{Name: glob.Name, InputSchema: glob.InputSchema},
+		{Name: grep.Name, InputSchema: grep.InputSchema},
 	}
 }
 

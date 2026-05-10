@@ -125,16 +125,21 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	go func() {
 		defer close(out)
 		defer resp.Body.Close()
-		p := &sseParser{ctx: ctx, out: out, tracer: c.tracer}
+		p := &sseParser{ctx: ctx, out: out, tracer: c.tracer, hasSchema: len(req.ResponseSchema) > 0}
 		p.run(resp.Body)
 	}()
 	return out, nil
 }
 
+// antiFenceDirective is appended to systemInstruction when responseJsonSchema is
+// not set. R-K8MR-FN4P: soft signal to reduce Gemini's fence-wrapping rate.
+const antiFenceDirective = "Output raw text only. Do not wrap your response in markdown code fences."
+
 // buildPayload translates a [provider.Request] into the GenerateContentRequest
 // JSON body.
 //
 // R-RTUW-106W: system prompt via systemInstruction.
+// R-K8MR-FN4P: anti-fence directive appended when responseJsonSchema is not set.
 // R-SFT2-WVJE: safetySettings BLOCK_NONE on all 5 harm categories.
 // R-M1C2-M8E5 / R-QKQL-VHR7: thinkingConfig with thinkingLevel and includeThoughts:false.
 // R-T5EY-Y23Z: cachedContent is not sent.
@@ -142,12 +147,24 @@ func (c *Client) Stream(ctx context.Context, req provider.Request) (<-chan provi
 // R-PP17-XGH5: responseJsonSchema when a schema is supplied.
 func buildPayload(model, effort string, req provider.Request) (map[string]any, error) {
 	payload := map[string]any{
-		"contents":        translateMessages(req.Messages),
-		"safetySettings":  safetySettings(),
+		"contents":         translateMessages(req.Messages),
+		"safetySettings":   safetySettings(),
 		"generationConfig": buildGenerationConfig(effort, req.ResponseSchema),
 	}
-	if req.SystemPrompt != "" {
-		// R-RTUW-106W: system prompt via systemInstruction, not a user turn.
+	// R-RTUW-106W: system prompt via systemInstruction, not a user turn.
+	// R-K8MR-FN4P: when responseJsonSchema is not set, append anti-fence directive;
+	// when schema is set, directive is omitted (structured output guarantees no fences).
+	if len(req.ResponseSchema) == 0 {
+		sysText := req.SystemPrompt
+		if sysText != "" {
+			sysText += "\n" + antiFenceDirective
+		} else {
+			sysText = antiFenceDirective
+		}
+		payload["systemInstruction"] = map[string]any{
+			"parts": []any{map[string]any{"text": sysText}},
+		}
+	} else if req.SystemPrompt != "" {
 		payload["systemInstruction"] = map[string]any{
 			"parts": []any{map[string]any{"text": req.SystemPrompt}},
 		}
@@ -404,6 +421,12 @@ type sseParser struct {
 	usage      *usageMeta
 	errored    bool
 	tracer     *trace.Tracer
+	// R-2WLP-5VTQ: buffer all text so outer-fence stripping can run on the
+	// accumulated text at the provider boundary before emitting EventTextDelta.
+	textBuf strings.Builder
+	// hasSchema is true when responseJsonSchema is set; both fence stripping
+	// (R-2WLP-5VTQ) and the directive (R-K8MR-FN4P) are skipped in that case.
+	hasSchema bool
 }
 
 // usageMeta holds the fields from the final chunk's usageMetadata.
@@ -420,6 +443,25 @@ func (p *sseParser) emit(e provider.Event) bool {
 		return true
 	case <-p.ctx.Done():
 		return false
+	}
+}
+
+// flushText emits any buffered text as a single EventTextDelta.
+// R-2WLP-5VTQ: when no responseJsonSchema is in effect, the accumulated text is
+// inspected for a single outer markdown code fence and stripped if matched.
+func (p *sseParser) flushText() {
+	if p.textBuf.Len() == 0 {
+		return
+	}
+	text := p.textBuf.String()
+	p.textBuf.Reset()
+	if !p.hasSchema {
+		if stripped, ok := stripOuterFence(text); ok {
+			text = stripped
+		}
+	}
+	if text != "" {
+		p.emit(provider.EventTextDelta{Text: text})
 	}
 }
 
@@ -457,8 +499,14 @@ func (p *sseParser) run(r io.Reader) {
 	flush()
 
 	if p.errored {
+		// Emit any text that arrived before the error chunk.
+		p.flushText()
 		return
 	}
+
+	// R-2WLP-5VTQ: flush buffered text (with outer-fence stripping) before
+	// emitting usage and done, so stripping runs at the provider boundary.
+	p.flushText()
 
 	// Emit usage from final chunk then signal completion.
 	if p.usage != nil {
@@ -520,6 +568,9 @@ func (p *sseParser) handleChunk(data string) {
 			}
 
 			if part.FunctionCall != nil {
+				// R-2WLP-5VTQ: flush buffered text before the tool-use event so
+				// the text block is emitted (and stripped) before the tool call.
+				p.flushText()
 				// R-P1V4-NTDY: emit thoughtSignature BEFORE EventToolUse so the
 				// agent loop's drainTurn places ThinkingBlock before ToolUseBlock
 				// in providerBlocks. translateAssistantMessage reads this ordering
@@ -539,14 +590,16 @@ func (p *sseParser) handleChunk(data string) {
 					Input: args,
 				})
 			} else if part.Text != "" {
-				// R-P1V4-NTDY: emit thoughtSignature BEFORE EventTextDelta so
-				// drainTurn's flushText() fires on the EventThinking, placing
-				// ThinkingBlock before TextBlock in providerBlocks. The ordering
-				// lets translateAssistantMessage attach the sig to the text part.
+				// R-P1V4-NTDY: emit thoughtSignature BEFORE the text so drainTurn's
+				// flushText() fires on the EventThinking, placing ThinkingBlock before
+				// TextBlock in providerBlocks. Flush any prior buffered text first so
+				// the ordering is preserved: prior text → thinking sig → new text.
 				if part.ThoughtSignature != "" {
+					p.flushText()
 					p.emit(provider.EventThinking{Text: "", Signature: part.ThoughtSignature})
 				}
-				p.emit(provider.EventTextDelta{Text: part.Text})
+				// R-2WLP-5VTQ: buffer text; outer-fence stripping runs at flush time.
+				p.textBuf.WriteString(part.Text)
 			}
 		}
 
@@ -634,6 +687,85 @@ func mapErrorStatus(status string, statusCode int) *provider.Error {
 	default:
 		return &provider.Error{Kind: provider.ErrUnknown, Msg: "google error"}
 	}
+}
+
+// stripOuterFence strips a single markdown code fence that wraps the entire text,
+// per R-2WLP-5VTQ. Returns the body and true when the pattern matches: an opening
+// fence on the first non-whitespace line, a closing ``` on the last non-whitespace
+// line, and no unbalanced fence in between. Returns text, false otherwise.
+func stripOuterFence(text string) (string, bool) {
+	lines := strings.Split(text, "\n")
+
+	first, last := -1, -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			if first == -1 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first == -1 || first == last {
+		return text, false
+	}
+
+	if !isOpeningFenceLine(strings.TrimSpace(lines[first])) {
+		return text, false
+	}
+	if strings.TrimSpace(lines[last]) != "```" {
+		return text, false
+	}
+
+	body := lines[first+1 : last]
+	if hasUnbalancedFences(body) {
+		return text, false
+	}
+	// Preserve the newline between the last body line and the closing fence
+	// per spec ("trailing newlines inside the body are preserved verbatim").
+	if len(body) == 0 {
+		return "", true
+	}
+	return strings.Join(body, "\n") + "\n", true
+}
+
+// isOpeningFenceLine reports whether line is a valid markdown code fence opener:
+// exactly ``` optionally followed by a language tag matching [A-Za-z0-9_+-]+.
+func isOpeningFenceLine(line string) bool {
+	if !strings.HasPrefix(line, "```") {
+		return false
+	}
+	lang := line[3:]
+	for _, ch := range lang {
+		if !((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+			(ch >= '0' && ch <= '9') || ch == '_' || ch == '+' || ch == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// hasUnbalancedFences reports whether the body lines contain any unmatched fence
+// marker. A ``` line (with optional lang) opens a fence; a bare ``` closes the
+// most recently opened one. Returns true if a fence is left open at the end or a
+// bare ``` appears when no fence is open.
+func hasUnbalancedFences(bodyLines []string) bool {
+	inFence := false
+	for _, l := range bodyLines {
+		trimmed := strings.TrimSpace(l)
+		if !strings.HasPrefix(trimmed, "```") {
+			continue
+		}
+		if inFence {
+			if trimmed == "```" {
+				inFence = false
+			}
+		} else {
+			if isOpeningFenceLine(trimmed) {
+				inFence = true
+			}
+		}
+	}
+	return inFence
 }
 
 // mapTransportError converts a Go transport error into a typed [provider.Error].

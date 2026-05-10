@@ -68,3 +68,22 @@ This file is about the loop that ties them together.
   fence-tolerant parser because tolerating fences would mask
   further drift in what models emit; failing loudly at the parse
   step keeps the contract honest.
+
+- R-XQHM-7TKL: when an iteration is invoked with a `--json-schema`
+  per cli-surface.md R-JNEB-EVLU, the agent loop populates
+  `provider.Request.ResponseSchema` with the schema's raw bytes on
+  every `client.Stream` call within that iteration — the initial
+  dispatch and every tool-result follow-up. Forwarding the schema
+  engages the provider-native structured-output mode (OpenAI's
+  `text.format.json_schema` per providers.md R-3Z86-0IPP, Google's
+  `responseJsonSchema` per providers.md R-PP17-XGH5), which is the
+  load-bearing first line of defense against shape drift. The
+  local validation per providers.md R-WFWM-BKWX continues to run
+  as the second line of defense, catching cases where a provider
+  silently degrades structured-output enforcement (notably Google
+  when tools are also active in the same request, per
+  providers/google.md §12). This requirement exists because the
+  `ResponseSchema` field is defined on `provider.Request` and the
+  providers correctly read it, but without an explicit assignment
+  in the agent loop the runtime call sites pass `nil`, leaving
+  every structured-output requirement above as dead code.

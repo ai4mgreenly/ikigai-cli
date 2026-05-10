@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -283,12 +284,18 @@ func runIteration(ctx context.Context, stdin io.Reader, stdout io.Writer, client
 		provTools[i] = provider.Tool{Name: d.Name, InputSchema: d.InputSchema}
 	}
 
+	// R-XQHM-7TKL: populate ResponseSchema so every client.Stream call
+	// within the iteration carries the schema, engaging provider-native
+	// structured-output mode (OpenAI json_schema, Google responseJsonSchema).
 	req := provider.Request{
 		Model:        resolved.BareID,
 		Effort:       effort,
 		SystemPrompt: agent.FramingPrompt,
 		Messages:     msgs,
 		Tools:        provTools,
+	}
+	if jsonSchema != "" {
+		req.ResponseSchema = json.RawMessage(jsonSchema)
 	}
 
 	// R-92NN-7DNI: wrap stdout so each emitted stream-json event is

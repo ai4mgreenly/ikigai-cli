@@ -73,8 +73,12 @@ func implementedToolNames(t *testing.T) []string {
 		t.Fatalf("read internal/tools: %v", err)
 	}
 	expected := map[string]string{
-		"read": "Read",
-		"bash": "Bash",
+		"read":  "Read",
+		"bash":  "Bash",
+		"write": "Write",
+		"edit":  "Edit",
+		"glob":  "Glob",
+		"grep":  "Grep",
 	}
 	var names []string
 	for _, e := range entries {
