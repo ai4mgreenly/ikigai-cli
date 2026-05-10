@@ -69,6 +69,25 @@ This file is about the loop that ties them together.
   further drift in what models emit; failing loudly at the parse
   step keeps the contract honest.
 
+- R-7CPI-8OYA: when ralph-loops passes `--system-prompt-file
+  <path>`, ikigai-cli reads the file's contents and concatenates
+  them with the framing system prompt required by R-8PF6-I8FP /
+  R-GA6J-9O0I on every provider request. The framing prompt
+  appears first; the file's contents appear after it, separated
+  by a blank line. Both prompts are present together; neither
+  replaces the other. The framing prompt remains load-bearing —
+  without it the model behaves as a chatbot and Gemini in
+  particular re-emits markdown-fenced JSON, breaking structured
+  output. If the file is missing or unreadable, that is a fatal
+  startup error per R-2247-BPXI whose message names the path. An
+  empty file is not an error: the framing prompt alone is used,
+  unchanged. When `--system-prompt-file` is not passed at all,
+  the framing prompt alone is used. ralph-loops invokes
+  ikigai-cli with `--system-prompt-file ./AGENTS.md` so the
+  build agent's standing instructions (the contents of
+  `app-root/AGENTS.md` in the iterating project) reach the
+  model on every iteration.
+
 - R-XQHM-7TKL: when an iteration is invoked with a `--json-schema`
   per cli-surface.md R-JNEB-EVLU, the agent loop populates
   `provider.Request.ResponseSchema` with the schema's raw bytes on

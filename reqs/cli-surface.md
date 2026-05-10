@@ -52,6 +52,19 @@ invocation contract.
     every user-message turn it processes (per wire-format.md and
     R-UXDS-W9UQ), so the flag is accepted and has no additional
     behavioral effect.
+  - `--bare` — ralph-loops passes this to tell `claude` to
+    suppress its default system-prompt preamble. ikigai-cli has
+    no such preamble (its only baseline is the framing prompt
+    pinned by R-8PF6-I8FP / R-GA6J-9O0I, which is load-bearing
+    and stays unconditionally), so the flag is accepted and
+    ignored.
+  - `--add-dir <dir>` — in `claude`'s surface this expands the
+    workspace tools are allowed to touch. ikigai-cli has no
+    permission system (R-1O1T-0MEX) and no implicit working-
+    directory restriction outside Bash (per tools.md
+    R-KM4I-88FI), so any path the operator points at is
+    already reachable. The flag is accepted, its argument
+    consumed, and no scope adjustment occurs.
   Rejecting any of these as "flag provided but not defined"
   violates the drop-in invariant (R-YARD-835I).
   Note: `--tools` is no longer a no-op flag; its value is
@@ -59,8 +72,14 @@ invocation contract.
   the model). ralph-loops still passes it empty by default,
   which means "all tools ikigai-cli ships," so the visible
   behavior under default ralph-loops invocations is unchanged.
+  Note: `--system-prompt-file <path>` is also part of the
+  ralph-loops flag set, but it is not a no-op — its semantics
+  are pinned by agent-loop.md R-7CPI-8OYA (the file's contents
+  are concatenated after the framing prompt on every provider
+  request).
   The complete ralph-loops flag set is pinned by R-6TC0-ZSKM
-  (`-p`), R-YFCR-J9IL (`--tools`), and this requirement
-  together; if ralph-loops adds a new flag in the future, a
-  corresponding requirement must be added here before ikigai-
-  cli is expected to remain a drop-in.
+  (`-p`), R-YFCR-J9IL (`--tools`), R-7CPI-8OYA
+  (`--system-prompt-file`), and this requirement together; if
+  ralph-loops adds a new flag in the future, a corresponding
+  requirement must be added here before ikigai-cli is expected
+  to remain a drop-in.
