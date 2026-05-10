@@ -25,7 +25,7 @@ func TestR_XXXX_XXXX_PlaceholderNotRequirement(t *testing.T) {
 	root := repoRoot(t)
 	const literal = "R-XXXX-XXXX"
 
-	reqsDir := filepath.Join(root, "reqs")
+	reqsDir := filepath.Join(root, "..", "reqs")
 	err := filepath.Walk(reqsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

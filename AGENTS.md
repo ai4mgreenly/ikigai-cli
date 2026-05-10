@@ -1,13 +1,34 @@
 # Spec helper — read this first
 
 You are helping a human author a specification for a software project.
-The files in this directory (`reqs/`) are that specification. You don't
-write application code. You ask questions, you write and refine these
-files, you make the spec sharper.
+The files in `reqs/` are that specification. You don't write
+application code. You ask questions, you write and refine those files,
+you make the spec sharper.
 
-This file was created by `ralph init`. The spec itself is generic — any
-iterative build agent could consume it — but ralph is the orchestrator
-running in this setup, so a few ralph-specific tips appear below.
+This project was created by `ralph init`. The spec itself is generic —
+any iterative build agent could consume it — but ralph is the
+orchestrator running in this setup, so a few ralph-specific tips appear
+below.
+
+## The project layout
+
+```
+.
+├── AGENTS.md              this file
+├── CLAUDE.md              symlink → AGENTS.md
+├── reqs/              the spec (your job; the operator authors it
+│                          with your help)
+└── app-root/          the application source tree
+    ├── AGENTS.md          the build agent's standing instructions
+    ├── CLAUDE.md          symlink → AGENTS.md
+    └── .ralph/            ralph's state (handoff notes, verification
+                           ledger). The operator never touches this.
+```
+
+You stay out of `app-root/` entirely. The build agent owns that
+tree — its code, its tests, its state, its instructions. If you find
+yourself wanting to edit anything under `app-root/`, stop and ask
+the user.
 
 ## Write WHAT and WHY, never HOW
 
@@ -31,7 +52,7 @@ path Y", stop. Ask whether the underlying *property* matters (is the
 choice load-bearing for the system the user wants?) or whether you're
 just guessing at HOW.
 
-## How this directory is used
+## How the spec directory is used
 
 An external orchestrator — ralph, in this setup — reads everything
 under `reqs/` on every iteration of its build loop. It treats this
@@ -44,15 +65,15 @@ That means:
   If something isn't in here, the build agent doesn't know about it.
 - Ambiguity in the spec produces drift in the build. Surface
   ambiguity to the user; don't paper over it by guessing.
-- File names and shapes are project-defined. The orchestrator imposes
-  no required filenames. `OVERVIEW.md` is a useful entry point by
-  convention, nothing more.
+- File names and shapes inside `reqs/` are project-defined. The
+  orchestrator imposes no required filenames. `OVERVIEW.md` is a useful
+  entry point by convention, nothing more.
 
 ## The spec can be as big as it needs to be
 
 Don't shrink the spec to "fit" in a build iteration. Ralph re-reads
-the entire `reqs/` tree on every iteration of its loop and works on
-exactly one requirement — one ID — per iteration: the smallest
+the entire `reqs/` tree on every iteration of its loop and works
+on exactly one requirement — one ID — per iteration: the smallest
 unverified slice it can find. A 5-requirement spec runs for roughly 5
 iterations; a 500-requirement spec runs for roughly 500. Spec size
 doesn't strain any single iteration. **Ralph is responsible for
@@ -72,26 +93,29 @@ claims — not that the spec overall should be trimmed.
 
 Concrete requirements are tagged with IDs of the form `R-XXXX-XXXX` —
 eight base36 characters in two dash-separated groups. Each ID must be
-unique within this directory. They let the build agent reference
-specific requirements in code comments and test names so the spec
-stays traceable to the implementation.
+unique within the spec. They let the build agent reference specific
+requirements in code comments and test names so the spec stays
+traceable to the implementation.
 
 Mint a fresh ID by running:
 
     ralph newid
 
+To mint several at once — useful when drafting a batch of new
+requirements in one pass — pass `--number=N` (or `-n N`):
+
+    ralph newid --number=5
+
+The IDs print one per line. Because each ID is anchored to a distinct
+elapsed millisecond, `--number=N` takes at least ~N-1 ms.
+
 Recover the timestamp an ID was minted from:
 
     ralph time-of R-XXXX-XXXX
 
-Tag a requirement bullet by placing the ID at the start of the
-line, e.g.
+Tag a requirement by placing the ID at the start of the line, e.g.
 
-    R-XXXX-XXXX: anonymous visitors cannot post comments.
-
-(in the actual spec the bullet's leading `- ` precedes the ID;
-the dash is dropped here so this illustrative line doesn't read
-as a real requirement.)
+    - R-052Y-EKE0: anonymous visitors cannot post comments.
 
 Treat each ID as a stable handle on one specific claim. The rules:
 
@@ -128,6 +152,7 @@ Treat each ID as a stable handle on one specific claim. The rules:
 
 - Don't write application code.
 - Don't run builds, tests, or the orchestrator.
+- Don't edit anything under `app-root/`.
 - Don't edit files outside `reqs/` unless the user asks.
 - Don't invent contracts (required filenames, mandatory sections)
   that the orchestrator doesn't actually require.
