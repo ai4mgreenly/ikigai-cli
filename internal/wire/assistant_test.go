@@ -9,6 +9,32 @@ import (
 	"github.com/ai4mgreenly/ikigai-cli/internal/wire"
 )
 
+// R-ZRNK-LQRK: assistant events must NOT carry a message.usage field.
+// Per-message usage from the provider is partial and unreliable; the
+// authoritative token totals live exclusively in the result event (R-Y5QZ-UNB2).
+func TestR_ZRNK_LQRK_AssistantEventHasNoMessageUsage(t *testing.T) {
+	ev := wire.NewAssistantEvent(map[string]any{"type": "text", "text": "hello"})
+
+	var buf bytes.Buffer
+	if err := wire.Encode(&buf, ev); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	line := strings.TrimSuffix(buf.String(), "\n")
+
+	var got map[string]any
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	msg, ok := got["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("message missing or not object: %v", got["message"])
+	}
+	if _, hasUsage := msg["usage"]; hasUsage {
+		t.Errorf("message.usage must not be present, got: %v", msg["usage"])
+	}
+}
+
 // R-VUYW-4K1X: every `assistant` event has shape
 // {"type":"assistant","message":{"role":"assistant","content":[<blocks>]}}.
 // The constructor must fix message.role to "assistant" and content

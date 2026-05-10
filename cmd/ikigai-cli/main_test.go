@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -622,6 +623,71 @@ func TestR_A351_VO9A_DispatchesWithoutWaitingForStdinEOF(t *testing.T) {
 	if lastEv["type"] != "result" {
 		t.Errorf("last event type = %q, want \"result\"", lastEv["type"])
 	}
+}
+
+// R-8SDW-BY0B: backend dispatch follows provider selection, one-to-one.
+// buildClient must construct the OpenAI backend for gpt-* models and the
+// Anthropic backend for claude-* models; no always-on default is permitted.
+func TestR_8SDW_BY0B_BackendDispatchFollowsProviderSelection(t *testing.T) {
+	t.Run("gpt_model_constructs_openai_client", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "test-openai-key")
+		t.Setenv("ANTHROPIC_API_KEY", "")
+		resolved := model.Resolved{Provider: model.ProviderOpenAI, BareID: "gpt-5.5"}
+		client, apiKey, err := buildClient(resolved)
+		if err != nil {
+			t.Fatalf("buildClient(openai): %v", err)
+		}
+		if apiKey != "test-openai-key" {
+			t.Errorf("apiKey = %q, want test-openai-key", apiKey)
+		}
+		typeName := fmt.Sprintf("%T", client)
+		if !strings.Contains(typeName, "openai") {
+			t.Errorf("expected openai client type, got %s", typeName)
+		}
+	})
+
+	t.Run("claude_model_constructs_anthropic_client", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+		t.Setenv("OPENAI_API_KEY", "")
+		resolved := model.Resolved{Provider: model.ProviderAnthropic, BareID: "claude-haiku-4-5"}
+		client, apiKey, err := buildClient(resolved)
+		if err != nil {
+			t.Fatalf("buildClient(anthropic): %v", err)
+		}
+		if apiKey != "test-anthropic-key" {
+			t.Errorf("apiKey = %q, want test-anthropic-key", apiKey)
+		}
+		typeName := fmt.Sprintf("%T", client)
+		if !strings.Contains(typeName, "anthropic") {
+			t.Errorf("expected anthropic client type, got %s", typeName)
+		}
+	})
+
+	t.Run("openai_uses_openai_key_not_anthropic_key", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "openai-key-abc")
+		t.Setenv("ANTHROPIC_API_KEY", "anthropic-key-xyz")
+		resolved := model.Resolved{Provider: model.ProviderOpenAI, BareID: "gpt-5.5"}
+		_, apiKey, err := buildClient(resolved)
+		if err != nil {
+			t.Fatalf("buildClient: %v", err)
+		}
+		if apiKey != "openai-key-abc" {
+			t.Errorf("apiKey = %q, want openai-key-abc (must not use anthropic key)", apiKey)
+		}
+	})
+
+	t.Run("anthropic_uses_anthropic_key_not_openai_key", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_API_KEY", "anthropic-key-abc")
+		t.Setenv("OPENAI_API_KEY", "openai-key-xyz")
+		resolved := model.Resolved{Provider: model.ProviderAnthropic, BareID: "claude-haiku-4-5"}
+		_, apiKey, err := buildClient(resolved)
+		if err != nil {
+			t.Fatalf("buildClient: %v", err)
+		}
+		if apiKey != "anthropic-key-abc" {
+			t.Errorf("apiKey = %q, want anthropic-key-abc (must not use openai key)", apiKey)
+		}
+	})
 }
 
 // fakeTwoStepClient returns firstEvents on the first Stream call and

@@ -35,6 +35,20 @@ existing provider is a routine spec edit, not a re-architecture.
   table and shipping a new binary; this is consistent with the
   configless rule (R-7IWS-GMJF).
 
+- R-ZZLK-I9CK: the model registry per R-YRPM-NUDF also carries
+  per-model pricing data: at minimum, dollar rates per million
+  input tokens and per million output tokens, plus separate
+  rates for any cache-read or cache-creation discount the
+  provider publishes for that model. This pricing data is the
+  sole source ikigai-cli uses to compute `result.total_cost_usd`
+  and `result.modelUsage[<model>].costUSD` per
+  wire-format.md R-Y5QZ-UNB2 and providers.md R-YSX3-4AE9. Prices
+  drift; updating a published rate is a routine spec edit and a
+  registry-data edit, not an architecture change. A model whose
+  pricing is unknown cannot ship: every entry in the registry
+  must declare every rate it bills on, otherwise the cost
+  totals would be silently wrong.
+
 - R-ZCFX-5XZ8: a `--model` value that parses to a known provider
   but is not in the registry is rejected at startup with an error
   listing the supported models for that provider. ikigai-cli does
@@ -103,23 +117,162 @@ existing provider is a routine spec edit, not a re-architecture.
   emitted by the model in adaptive-thinking mode) are forwarded
   to stdout as `thinking` blocks per wire-format.md R-SA9P-R1H4.
 
-## OpenAI and Google — moved out of MVP spec
+## OpenAI
 
-The v2 OpenAI and Google Gemini provider design context (which
-informed the abstraction shape at R-S04B-QD3D) lives
-under `docs/v2-providers/`:
+- R-WWTI-LSSO: ikigai-cli's OpenAI backend talks to the OpenAI
+  Responses API directly over HTTPS at
+  `POST https://api.openai.com/v1/responses`, using Server-Sent
+  Events (SSE) for streaming responses. The Chat Completions
+  endpoint (`/v1/chat/completions`) is not used and not supported
+  in v1. This is load-bearing: the Responses API is the only
+  surface that exposes signed reasoning round-trip
+  (`reasoning.encrypted_content`) needed to satisfy R-ROBI-V64M
+  for OpenAI.
+
+- R-0W9B-7E8I: authentication uses the `OPENAI_API_KEY` env var
+  as a bearer credential — `Authorization: Bearer <key>`. No
+  `OpenAI-Organization` header, no `OpenAI-Project` header, no
+  Azure OpenAI routing in v1 — first-party OpenAI API only. A
+  future Azure / org-routing surface is a v-bump decision, not a
+  flag-driven extension.
+
+- R-1GZL-PHUB: OpenAI backend in MVP supports exactly one model:
+  `gpt-5.5`. Legal `--effort` values for `gpt-5.5` are
+  `none | low | medium | high | xhigh`. Any other value
+  (including `minimal`, which is legal on some other 5.x models
+  but not on gpt-5.5) is rejected at startup per R-ZX67-O1L1
+  with an error listing the five legal values. Other 5.x family
+  members (`gpt-5.5-pro`, `gpt-5.5-mini`, etc.) and earlier
+  generations are deferred; the model registry per R-YRPM-NUDF
+  must be shaped so adding them is a data edit, not an
+  architecture change.
+
+- R-22XS-LD6T: when `--effort` is omitted on `--model=gpt-5.5`,
+  ikigai-cli sends `reasoning.effort: "medium"` explicitly in
+  the request body. The default is pinned by the model registry,
+  not deferred to OpenAI's server-side default; this keeps
+  `--raw` traces under R-92NN-7DNI faithful to what was actually
+  requested and insulates ikigai-cli's behavior from drift in
+  OpenAI's defaults.
+
+- R-2RBS-8S0P: tool-use translation. OpenAI's Responses API
+  represents tool calls as `function_call` items in the streamed
+  output and tool results as `function_call_output` items in the
+  next request's `input` array. The OpenAI backend translates
+  these to and from Claude Code's `tool_use` / `tool_result`
+  blocks on the wire per R-ZRRF-LGW1. Tool input arguments
+  arrive as JSON-encoded strings on OpenAI's side; ikigai-cli
+  decodes them into the JSON values that go into stream-json
+  `tool_use.input`, and re-encodes when emitting tool calls back
+  to OpenAI on subsequent turns.
+
+- R-ZEVA-05QR: usage mapping. The OpenAI Responses API reports
+  iteration-level usage on `response.completed.usage` (cumulative
+  across all turns made within one request, with reasoning
+  tokens already folded into `output_tokens`). The OpenAI backend
+  maps it onto the standard shape required by R-YSX3-4AE9:
+  - `usage.input_tokens` ← OpenAI `usage.input_tokens`
+  - `usage.output_tokens` ← OpenAI `usage.output_tokens`
+    (reasoning tokens are already included; do not add them
+    separately or double-count)
+  - `usage.cache_read_input_tokens` ← OpenAI
+    `usage.input_tokens_details.cached_tokens`
+  - `usage.cache_creation_input_tokens` ← `0` (OpenAI has no
+    cache-creation concept; the field is reported as zero per
+    R-YSX3-4AE9)
+  Cost contribution toward `total_cost_usd` and the per-model
+  `modelUsage[<model>].costUSD` is computed from these counts
+  using the OpenAI model's pricing entry in the registry per
+  R-ZZLK-I9CK; OpenAI does not expose a billing dollar amount
+  on the response, and ikigai-cli does not query a billing API.
+
+- R-3V3G-PYML: tool-definition adaptation. The OpenAI backend
+  rewrites each tool's neutral input schema (per tools.md
+  R-YNXM-CVXI) into the strict-mode shape OpenAI's Responses API
+  enforces when `strict: true` is set on a function tool: every
+  object level declares `additionalProperties: false`, every
+  property declared in `properties` is listed in `required`, and
+  fields that are optional in the neutral schema are expressed as
+  nullable union types. The neutral schema in the tool definition
+  is unchanged; adaptation is per-request, on the wire. This is
+  the OpenAI-specific instance of R-3959-U3A3 and is what makes
+  Claude-Code-shaped tools usable on the Responses API without
+  forcing every tool author to encode OpenAI's strict-mode rules.
+
+- R-3D9Z-4ND7: stateless reasoning round-trip. The OpenAI
+  backend always sends `store: false` and (whenever a reasoning
+  model is in use) `include: ["reasoning.encrypted_content"]`.
+  `reasoning` items returned by the model are appended to the
+  conversation history unchanged — same `id`, same
+  `encrypted_content` — and replayed in the `input` array of
+  every subsequent request in the same iteration. This is
+  OpenAI's equivalent of Anthropic's signed-thinking
+  preservation and satisfies R-ROBI-V64M for the OpenAI
+  backend. Server-side state (`previous_response_id`,
+  `store: true`) is not used in v1.
+
+- R-3Z86-0IPP: structured-output enforcement uses OpenAI's
+  native Responses-API feature
+  (`text.format: {type: "json_schema", strict: true, schema:
+  ...}`). The schema supplied via `--json-schema` (per
+  R-JNEB-EVLU) is forwarded verbatim into `text.format.schema`
+  with `strict: true`. There is no prompt-level fallback path
+  in v1: gpt-5.5 supports native strict schema enforcement, so
+  R-WFWM-BKWX's prompt-and-validate fallback is not exercised
+  on the OpenAI backend. If the supplied schema fails OpenAI's
+  strict-mode validation (e.g. missing `additionalProperties:
+  false`, optional fields not declared as nullable unions),
+  the resulting 400 is surfaced as an iteration error per
+  R-E2W7-K5JB without translation — repairing the schema is
+  the operator's responsibility.
+
+- R-4JYG-IMBI: reasoning summaries are not surfaced on stdout.
+  The OpenAI backend does not request `reasoning.summary` and
+  does not forward `response.reasoning_summary_*` events as
+  Claude `thinking` blocks. The `encrypted_content` round-trip
+  per R-3D9Z-4ND7 is internal to the conversation history; the
+  human-readable summary stream is not part of the v1 wire
+  surface. This keeps the OpenAI backend's stream-json output
+  uniform with the Anthropic backend's output for non-thinking
+  models, and avoids leaking reasoning text that the Responses
+  API itself does not consider end-user-visible.
+
+- R-574J-S9EP: the OpenAI backend maps Responses-API HTTP and
+  SSE error shapes into the `provider.ErrorKind` taxonomy:
+  `authentication_error` → `ErrAuth`; `invalid_request_error`
+  → `ErrInvalidRequest`; `rate_limit_error` → `ErrRateLimit`;
+  read/connect timeouts → `ErrTimeout`;
+  `server_error` / `overloaded_error` and other 5xx →
+  `ErrServer`; anything else → `ErrUnknown`. Raw HTTP status
+  codes and response bodies do not reach stdout, per
+  R-E2W7-K5JB.
+
+- R-5RUU-AD0I: the system prompt under R-8PF6-I8FP is delivered
+  to the Responses API via the top-level `instructions` field,
+  not as a `developer`- or `system`-role item inside `input`.
+  This keeps the framing prompt out of conversation history and
+  matches the Responses API's documented precedence (an
+  `instructions` value outranks any `developer`-role item, and a
+  `developer`-role item outranks any `system`-role item).
+
+The implementation-grade wire reference for the OpenAI backend
+lives at `providers/openai.md`.
+
+## Google Gemini — design context
+
+Gemini is deferred to a later version; the design context that
+shaped the v1 abstraction lives under `docs/v2-providers/`:
 
 - `docs/v2-providers/overview.md` — high-level v2 design notes
-- `docs/v2-providers/openai.md` — OpenAI Responses API reference
 - `docs/v2-providers/google.md` — Google Generative Language API reference
 
-These are not requirements the MVP build agent must satisfy.
-When v2 work begins, mint fresh requirement IDs and place
+These are not requirements the v1 build agent must satisfy.
+When Gemini work begins, mint fresh requirement IDs and place
 implementable claims back under `reqs/`. The cross-cutting
-section below still mentions OpenAI and Gemini behaviors as
-forward-looking obligations on the abstraction itself; those
-references stay because they constrain the v1 abstraction's
-shape, not because v1 implements them.
+section below still mentions Gemini behaviors as forward-looking
+obligations on the abstraction itself; those references stay
+because they constrain the v1 abstraction's shape, not because
+v1 implements Gemini.
 
 ## Cross-cutting provider behavior
 
@@ -134,9 +287,11 @@ shape, not because v1 implements them.
     be preserved or the API 400-rejects subsequent requests
     carrying the matching `tool_result`. Non-negotiable for any
     Anthropic iteration that uses tools.
-  - **v2 — OpenAI quality**: under `store: false`, the backend
-    must request `include: ["reasoning.encrypted_content"]` and
-    round-trip `reasoning` items in subsequent `input` arrays.
+  - **MVP — OpenAI correctness**: under `store: false`, the
+    backend must request `include: ["reasoning.encrypted_content"]`
+    and round-trip `reasoning` items in subsequent `input`
+    arrays. See R-3D9Z-4ND7. Non-negotiable for any OpenAI
+    iteration that uses tools or reasoning.
   - **v2 — Gemini quality**: `thoughtSignature` on `thought` parts
     must be echoed back in subsequent contents.
   The abstraction must accommodate per-provider thinking-state
@@ -155,6 +310,32 @@ shape, not because v1 implements them.
   model up to a bounded number of times before surfacing an
   iteration error. A model is not "supported" if ikigai-cli
   cannot guarantee structured output for it.
+
+- R-YSX3-4AE9: each backend populates the `result` event's
+  `usage`, `total_cost_usd`, `num_turns`, `duration_ms`, and
+  `modelUsage` fields per wire-format.md R-Y5QZ-UNB2. The standard
+  `usage` shape is Claude Code's; backends map their provider's
+  native usage onto it. Fields the underlying provider does not
+  expose (e.g. cache-creation token counts on a backend with no
+  cache-creation concept) are reported as zero, not omitted.
+  `total_cost_usd` and per-model `costUSD` are computed from the
+  per-model pricing data in the model registry (R-ZZLK-I9CK)
+  applied to the iteration's token totals; they are not taken
+  from any provider-side billing field. Per-provider mapping
+  details live in the provider sections (R-1TGL-373X for
+  Anthropic cache fields, R-ZEVA-05QR for OpenAI).
+
+- R-3959-U3A3: each provider is responsible for adapting the
+  neutral tool input schemas (Claude-Code-shaped, per tools.md
+  R-YNXM-CVXI) into whatever shape its wire format requires
+  before transmission. The neutral schema declared by the tool
+  is the advertised contract; per-request adaptation to backend-
+  specific constraints (additional-properties policies, required-
+  property rules, optional-field encodings, naming conventions)
+  is owned by the backend that needs them. This isolates per-
+  provider quirks to the provider that introduces them, so tool
+  authors and other backends are not forced to encode constraints
+  that don't apply to them.
 
 - R-E2W7-K5JB: provider HTTP/SSE errors, rate-limit responses,
   and connection timeouts terminate the iteration with a `result`

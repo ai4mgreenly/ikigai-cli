@@ -121,14 +121,46 @@ about.
   result event within the same iteration; ralph-loops uses the
   result event as the terminator and stops reading.
 
-- R-13ZB-EZZK: the `result` event has shape
-  `{"type":"result","structured_output":<json-value>,"is_error":<bool>}`.
-  `structured_output` is the only field required for ralph-loops
-  to make progress; `is_error` flags iteration-level failure.
-  Optional fields (`num_turns`, `duration_ms`, `total_cost_usd`,
-  `usage` with token counts) may be added in later versions for
-  parity with `claude`'s verbose-mode output but are not part of
-  the MVP contract.
+- R-Y5QZ-UNB2: the `result` event has the shape Claude Code's
+  stream-json verbose-mode result event has. The fields ralph-loops
+  reads to make progress and to report iteration accounting:
+  - `type: "result"`
+  - `structured_output: <json-value>` — required for ralph-loops
+    to make progress
+  - `is_error: <bool>` — iteration-level failure flag
+  - `num_turns: <int>` — assistant turns within the iteration
+  - `duration_ms: <int>` — wall-clock duration of the iteration
+  - `total_cost_usd: <number>` — dollar cost of the iteration,
+    summed across every assistant turn and every model used
+  - `usage: { input_tokens, output_tokens,
+    cache_read_input_tokens, cache_creation_input_tokens, ... }`
+    — cumulative token counts for the iteration in Claude Code's
+    shape. Provider-specific subfields (e.g. Anthropic's
+    `cache_creation.ephemeral_5m_input_tokens` /
+    `ephemeral_1h_input_tokens`) are populated when the backend
+    exposes them; otherwise the field is absent or zero.
+  - `modelUsage: { "<model-id>": { inputTokens, outputTokens,
+    cacheReadInputTokens, cacheCreationInputTokens, costUSD,
+    contextWindow, maxOutputTokens, ... } }` — per-model
+    breakdown, keyed by the full model id used during the
+    iteration.
+  Per-backend mapping of the underlying provider's native usage
+  fields onto this standard shape is governed by providers.md
+  R-YSX3-4AE9 and the per-provider mapping requirements there.
+  Replaces and retires R-13ZB-EZZK.
+
+- R-ZRNK-LQRK: ikigai-cli does **not** emit `message.usage` on
+  per-`assistant` events, even though Claude Code does. The
+  per-message `usage` Claude Code emits during streaming is
+  partial — output_tokens in particular reflects whatever has
+  streamed so far, not the message's final count — so summing or
+  reading it across events produces wrong totals. The `result`
+  event's `usage` (per R-Y5QZ-UNB2) is the single authoritative
+  source of token accounting for an iteration. This is a
+  deliberate divergence from Claude Code's wire shape; the
+  motivating principle (give consumers correct totals, not
+  Claude-Code-flavored partial ones) outranks bit-for-bit parity
+  in this one place.
 
 - R-1OPL-X3LD: `structured_output` must be a JSON value that
   validates against the schema supplied via `--json-schema`. For
@@ -156,7 +188,8 @@ about.
 
 ralph-loops reads only the fields enumerated above. Anything else
 in Claude Code's stream-json — `assistant.message.id` /
-`stop_reason` / per-turn `usage`, block-level `cache_control`,
-optional `result` fields beyond R-13ZB-EZZK — may be included or
-omitted at ikigai-cli's discretion. Adding parity fields later is
-not a breaking change.
+`stop_reason`, block-level `cache_control`, optional `result`
+fields beyond R-Y5QZ-UNB2 — may be included or omitted at
+ikigai-cli's discretion. Adding parity fields later is not a
+breaking change. Per-`assistant` `message.usage` is explicitly
+*not* emitted (R-ZRNK-LQRK).

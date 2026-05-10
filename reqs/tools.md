@@ -20,6 +20,11 @@ of which provider answers.
   used Claude Code's `Read` or `Bash` must be able to call
   ikigai-cli's version with the same arguments and get
   semantically equivalent behavior for the supported subset.
+  This Claude-Code-matching shape is the *advertised neutral*
+  schema; providers may transform it on the wire to satisfy
+  backend-specific constraints (per providers.md R-3959-U3A3).
+  The transformation is internal to the backend — the schema
+  the tool itself declares stays neutral.
 
 - R-Z8NW-UZJB: tool invocations from the model arrive as
   `tool_use` content blocks in `assistant` events on stdout, and

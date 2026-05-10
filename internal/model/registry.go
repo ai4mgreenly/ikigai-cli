@@ -10,9 +10,14 @@
 // R-MPR7-P0A4: MVP Anthropic backend supports two models:
 //   - claude-haiku-4-5: no --effort accepted
 //   - claude-sonnet-4-6: accepts low|medium|high|xhigh|max
-// The other providers' rows are intentionally absent in v1; the table
-// shape is what makes adding them later a data edit, not an
-// architectural change.
+//
+// R-1GZL-PHUB: MVP OpenAI backend supports one model:
+//   - gpt-5.5: accepts none|low|medium|high|xhigh; default "medium" (R-22XS-LD6T)
+//
+// R-ZZLK-I9CK: the registry also carries per-model pricing data used to
+// compute total_cost_usd and modelUsage[<model>].costUSD on result events.
+// Every entry must declare every rate it bills on; a model with unknown
+// pricing cannot ship (silently-wrong totals).
 package model
 
 import (
@@ -21,22 +26,142 @@ import (
 	"strings"
 )
 
-// efforts holds the legal --effort vocabulary for a given model. A
-// nil slice means the model takes no --effort argument at all (per
+// PricingSpec carries USD per-million token rates for a model.
+// R-ZZLK-I9CK: every registry entry must declare all rates it bills on.
+// Zero means the provider does not charge for that tier (e.g. OpenAI
+// has no cache-creation charge, so CacheCreationPerM is 0 for gpt-5.5).
+type PricingSpec struct {
+	InputPerM         float64 // USD per million input tokens
+	OutputPerM        float64 // USD per million output tokens
+	CacheReadPerM     float64 // USD per million cache-read input tokens
+	CacheCreationPerM float64 // USD per million cache-creation input tokens
+}
+
+// ComputeCost returns the total USD cost for the given token counts.
+func (p PricingSpec) ComputeCost(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int) float64 {
+	return float64(inputTokens)/1e6*p.InputPerM +
+		float64(outputTokens)/1e6*p.OutputPerM +
+		float64(cacheReadTokens)/1e6*p.CacheReadPerM +
+		float64(cacheCreationTokens)/1e6*p.CacheCreationPerM
+}
+
+// modelSpec holds the legal --effort vocabulary, the pinned default
+// effort, pricing data, and static capability data for a given model.
+//
+// efforts: nil means the model takes no --effort argument at all (per
 // R-MPR7-P0A4 for Haiku 4.5). A non-nil slice lists the accepted
 // values; the per-flag effort-validation pass (R-ZX67-O1L1) reads it.
+//
+// defaultEffort: when --effort is omitted and efforts is non-nil, the
+// backend uses this value in the request. R-22XS-LD6T pins "medium" for
+// gpt-5.5. An empty string means no explicit default (the Anthropic
+// backend handles effort internally for adaptive-thinking models).
 type modelSpec struct {
-	efforts []string
+	efforts         []string
+	defaultEffort   string
+	pricing         PricingSpec
+	contextWindow   int // maximum context length in tokens
+	maxOutputTokens int // maximum output tokens per request
+}
+
+// ContextSpec carries the static capacity limits for a model.
+// R-Y5QZ-UNB2: used to populate contextWindow and maxOutputTokens in
+// the result event's modelUsage entries.
+type ContextSpec struct {
+	ContextWindow   int
+	MaxOutputTokens int
+}
+
+// ModelContext returns the ContextSpec for the resolved model.
+func ModelContext(r Resolved) ContextSpec {
+	if models, ok := registry[r.Provider]; ok {
+		if spec, ok := models[r.BareID]; ok {
+			return ContextSpec{
+				ContextWindow:   spec.contextWindow,
+				MaxOutputTokens: spec.maxOutputTokens,
+			}
+		}
+	}
+	return ContextSpec{}
+}
+
+// DefaultEffort returns the registry-pinned default effort string for r.
+// Returns "" if the model has no registered default (Anthropic models
+// handle effort in the backend; nil-effort models have no default).
+func DefaultEffort(r Resolved) string {
+	if models, ok := registry[r.Provider]; ok {
+		if spec, ok := models[r.BareID]; ok {
+			return spec.defaultEffort
+		}
+	}
+	return ""
+}
+
+// ModelPricing returns the PricingSpec for the resolved model.
+// R-ZZLK-I9CK: every registry entry declares all rates it bills on;
+// this function is the sole source for computing total_cost_usd and
+// modelUsage[<model>].costUSD on result events.
+func ModelPricing(r Resolved) PricingSpec {
+	if models, ok := registry[r.Provider]; ok {
+		if spec, ok := models[r.BareID]; ok {
+			return spec.pricing
+		}
+	}
+	return PricingSpec{}
 }
 
 // registry: provider -> bare model ID -> spec. The keys carry any
 // suffix that distinguishes context variants (e.g. "[1m]"); the
 // resolved bare ID is matched verbatim.
 // R-MPR7-P0A4: Anthropic MVP models.
+// R-1GZL-PHUB: OpenAI MVP model.
+// R-ZZLK-I9CK: every entry carries pricing data (USD per million tokens).
 var registry = map[Provider]map[string]modelSpec{
 	ProviderAnthropic: {
-		"claude-haiku-4-5":  {efforts: nil},
-		"claude-sonnet-4-6": {efforts: []string{"low", "medium", "high", "xhigh", "max"}},
+		// R-MPR7-P0A4: claude-haiku-4-5 — no --effort accepted.
+		// Pricing: https://www.anthropic.com/pricing (as of 2026-05)
+		"claude-haiku-4-5": {
+			efforts: nil,
+			pricing: PricingSpec{
+				InputPerM:         0.80,
+				OutputPerM:        4.00,
+				CacheReadPerM:     0.08,
+				CacheCreationPerM: 1.00,
+			},
+			contextWindow:   200000,
+			maxOutputTokens: 8192,
+		},
+		// R-MPR7-P0A4: claude-sonnet-4-6 — accepts low|medium|high|xhigh|max.
+		// Pricing: https://www.anthropic.com/pricing (as of 2026-05)
+		"claude-sonnet-4-6": {
+			efforts: []string{"low", "medium", "high", "xhigh", "max"},
+			pricing: PricingSpec{
+				InputPerM:         3.00,
+				OutputPerM:        15.00,
+				CacheReadPerM:     0.30,
+				CacheCreationPerM: 3.75,
+			},
+			contextWindow:   200000,
+			maxOutputTokens: 64000,
+		},
+	},
+	ProviderOpenAI: {
+		// R-1GZL-PHUB: gpt-5.5 accepts none|low|medium|high|xhigh.
+		// R-22XS-LD6T: when --effort is omitted, send "medium".
+		// R-ZEVA-05QR: OpenAI has no cache-creation charge (CacheCreationPerM=0).
+		// Pricing: https://platform.openai.com/pricing (as of 2026-05)
+		"gpt-5.5": {
+			efforts:       []string{"none", "low", "medium", "high", "xhigh"},
+			defaultEffort: "medium",
+			pricing: PricingSpec{
+				InputPerM:         2.00,
+				OutputPerM:        8.00,
+				CacheReadPerM:     0.50,
+				CacheCreationPerM: 0.00,
+			},
+			contextWindow:   131072,
+			maxOutputTokens: 32768,
+		},
 	},
 }
 

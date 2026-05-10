@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/ai4mgreenly/ikigai-cli/internal/model"
 	"github.com/ai4mgreenly/ikigai-cli/internal/provider"
 	"github.com/ai4mgreenly/ikigai-cli/internal/schema"
 	"github.com/ai4mgreenly/ikigai-cli/internal/tools"
@@ -53,16 +55,36 @@ const maxStructuredAttempts = 3
 // message in structured_output.
 // Run executes one iteration. tracer may be nil; when non-nil it
 // receives trace events for every tool dispatch.
+//
+// R-Y5QZ-UNB2: Run tracks turn count, wall-clock duration, and
+// accumulated token usage; the terminal result event carries these
+// values in num_turns, duration_ms, total_cost_usd, usage, and
+// modelUsage.
 func Run(ctx context.Context, client provider.Client, sess *wire.Session, req provider.Request, sch *schema.Schema, tracer *trace.Tracer) error {
+	startTime := time.Now()
 	var lastErr error
 	attempt := 0
+	numTurns := 0
+	var cumUsage provider.EventUsage
+
+	// Resolve model for pricing/capacity lookup; ignore error so tests
+	// with empty req.Model continue to work (zero pricing is the fallback).
+	resolved, _ := model.Resolve(req.Model)
+	pricing := model.ModelPricing(resolved)
+	caps := model.ModelContext(resolved)
+
 	for {
 		events, err := client.Stream(ctx, req)
 		if err != nil {
 			return emitIterationError(sess, err.Error())
 		}
 
-		wireBlocks, providerBlocks, text, stop := drainTurn(events)
+		wireBlocks, providerBlocks, text, stop, usage := drainTurn(events)
+		numTurns++
+		cumUsage.InputTokens += usage.InputTokens
+		cumUsage.OutputTokens += usage.OutputTokens
+		cumUsage.CacheReadInputTokens += usage.CacheReadInputTokens
+		cumUsage.CacheCreationInputTokens += usage.CacheCreationInputTokens
 
 		if err := sess.EmitAssistant(wire.NewAssistantEvent(wireBlocks...)); err != nil {
 			return err
@@ -80,7 +102,37 @@ func Run(ctx context.Context, client provider.Client, sess *wire.Session, req pr
 		attempt++
 		value, perr := parseAndValidate(text, sch)
 		if perr == nil {
-			ev, err := wire.NewResultEvent(value, false)
+			// R-Y5QZ-UNB2: build iteration accounting for the result event.
+			costUSD := pricing.ComputeCost(
+				cumUsage.InputTokens,
+				cumUsage.OutputTokens,
+				cumUsage.CacheReadInputTokens,
+				cumUsage.CacheCreationInputTokens,
+			)
+			stats := wire.IterationStats{
+				NumTurns:   numTurns,
+				DurationMs: time.Since(startTime).Milliseconds(),
+				Usage: wire.UsageTotals{
+					InputTokens:              cumUsage.InputTokens,
+					OutputTokens:             cumUsage.OutputTokens,
+					CacheReadInputTokens:     cumUsage.CacheReadInputTokens,
+					CacheCreationInputTokens: cumUsage.CacheCreationInputTokens,
+				},
+			}
+			if req.Model != "" {
+				stats.ModelUsage = map[string]wire.ModelUsageEntry{
+					req.Model: {
+						InputTokens:              cumUsage.InputTokens,
+						OutputTokens:             cumUsage.OutputTokens,
+						CacheReadInputTokens:     cumUsage.CacheReadInputTokens,
+						CacheCreationInputTokens: cumUsage.CacheCreationInputTokens,
+						CostUSD:                  costUSD,
+						ContextWindow:            caps.ContextWindow,
+						MaxOutputTokens:          caps.MaxOutputTokens,
+					},
+				}
+			}
+			ev, err := wire.NewResultEventFull(value, false, stats)
 			if err != nil {
 				return emitIterationError(sess, fmt.Sprintf("structured_output marshal: %v", err))
 			}
@@ -153,8 +205,9 @@ func dispatchTools(ctx context.Context, sess *wire.Session, req provider.Request
 // drainTurn reads the provider event channel until close and returns
 // (1) the wire blocks for stream emission, (2) the provider blocks for
 // history append (preserving signatures per R-ROBI-V64M), (3) the
-// concatenated assistant text, and (4) the observed stop reason.
-func drainTurn(events <-chan provider.Event) (wireBlocks []any, providerBlocks []provider.Block, text string, stop string) {
+// concatenated assistant text, (4) the observed stop reason, and
+// (5) the last EventUsage seen (used by Run for iteration accounting).
+func drainTurn(events <-chan provider.Event) (wireBlocks []any, providerBlocks []provider.Block, text string, stop string, usage provider.EventUsage) {
 	var textBuf strings.Builder
 	var allText strings.Builder
 	flushText := func() {
@@ -191,7 +244,8 @@ func drainTurn(events <-chan provider.Event) (wireBlocks []any, providerBlocks [
 		case provider.EventDone:
 			stop = e.StopReason
 		case provider.EventUsage:
-			// usage totals are not part of the v1 wire surface.
+			// R-Y5QZ-UNB2: capture usage for iteration accounting.
+			usage = e
 		}
 	}
 	flushText()

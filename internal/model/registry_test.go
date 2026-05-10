@@ -155,6 +155,111 @@ func TestR_ZX67_O1L1_IllegalEffortListsSupportedValues(t *testing.T) {
 	}
 }
 
+// R-1GZL-PHUB: OpenAI MVP backend supports exactly gpt-5.5 with effort
+// vocabulary none|low|medium|high|xhigh. "minimal" is explicitly illegal.
+// An empty --effort is accepted (backend will use the pinned default per
+// R-22XS-LD6T). Other 5.x models (gpt-5.5-pro, etc.) are deferred.
+func TestR_1GZL_PHUB_GPT55InRegistryWithEffortVocab(t *testing.T) {
+	r := Resolved{Provider: ProviderOpenAI, BareID: "gpt-5.5"}
+
+	if err := Validate(r); err != nil {
+		t.Fatalf("Validate(gpt-5.5) = %v, want nil", err)
+	}
+
+	legalEfforts := []string{"none", "low", "medium", "high", "xhigh"}
+	for _, e := range legalEfforts {
+		t.Run("accept_"+e, func(t *testing.T) {
+			if err := ValidateEffort(r, e); err != nil {
+				t.Errorf("ValidateEffort(gpt-5.5, %q) = %v, want nil", e, err)
+			}
+		})
+	}
+
+	// empty effort is accepted — backend applies the pinned default
+	if err := ValidateEffort(r, ""); err != nil {
+		t.Fatalf("ValidateEffort(gpt-5.5, \"\") = %v, want nil", err)
+	}
+
+	// "minimal" is specifically not legal on gpt-5.5
+	for _, illegal := range []string{"minimal", "thinking", "xlow", "max"} {
+		t.Run("reject_"+illegal, func(t *testing.T) {
+			err := ValidateEffort(r, illegal)
+			if err == nil {
+				t.Errorf("ValidateEffort(gpt-5.5, %q) = nil, want rejection", illegal)
+			}
+		})
+	}
+
+	// deferred models must remain absent from the registry
+	deferred := []string{"gpt-5.5-pro", "gpt-5.5-mini", "gpt-4o"}
+	models := registry[ProviderOpenAI]
+	for _, id := range deferred {
+		if _, ok := models[id]; ok {
+			t.Errorf("deferred model %q must not be in the registry", id)
+		}
+	}
+}
+
+// R-22XS-LD6T: when --effort is omitted on gpt-5.5, the registry-pinned
+// default is "medium". DefaultEffort must return "medium" for gpt-5.5
+// and "" for Anthropic models (which have no registry-level default).
+func TestR_22XS_LD6T_DefaultEffortPinnedForGPT55(t *testing.T) {
+	r := Resolved{Provider: ProviderOpenAI, BareID: "gpt-5.5"}
+	if got := DefaultEffort(r); got != "medium" {
+		t.Errorf("DefaultEffort(gpt-5.5) = %q, want %q", got, "medium")
+	}
+
+	// Anthropic models have no registry-level default
+	for _, id := range []string{"claude-haiku-4-5", "claude-sonnet-4-6"} {
+		ra := Resolved{Provider: ProviderAnthropic, BareID: id}
+		if got := DefaultEffort(ra); got != "" {
+			t.Errorf("DefaultEffort(%s) = %q, want \"\"", id, got)
+		}
+	}
+}
+
+// R-ZZLK-I9CK: every entry in the model registry must declare per-model
+// pricing data (InputPerM, OutputPerM, and any cache rates). A model with
+// unknown pricing cannot ship — silently-wrong cost totals. This test
+// verifies that every current registry entry has non-zero InputPerM and
+// OutputPerM, and that ModelPricing returns the same data.
+func TestR_ZZLK_I9CK_RegistryHasPricingForAllModels(t *testing.T) {
+	for provider, models := range registry {
+		for id, spec := range models {
+			t.Run(string(provider)+"/"+id, func(t *testing.T) {
+				if spec.pricing.InputPerM <= 0 {
+					t.Errorf("model %q has InputPerM=%v; must be > 0", id, spec.pricing.InputPerM)
+				}
+				if spec.pricing.OutputPerM <= 0 {
+					t.Errorf("model %q has OutputPerM=%v; must be > 0", id, spec.pricing.OutputPerM)
+				}
+				// ModelPricing must return the same spec as the registry.
+				r := Resolved{Provider: provider, BareID: id}
+				got := ModelPricing(r)
+				if got != spec.pricing {
+					t.Errorf("ModelPricing(%q) = %+v, want %+v", id, got, spec.pricing)
+				}
+			})
+		}
+	}
+}
+
+// R-ZZLK-I9CK: ComputeCost uses per-million rates correctly.
+func TestR_ZZLK_I9CK_ComputeCostUsesPerMillionRates(t *testing.T) {
+	p := PricingSpec{
+		InputPerM:         1.00,
+		OutputPerM:        2.00,
+		CacheReadPerM:     0.10,
+		CacheCreationPerM: 0.20,
+	}
+	// 1M input + 500K output + 200K cache-read + 100K cache-creation
+	got := p.ComputeCost(1_000_000, 500_000, 200_000, 100_000)
+	want := 1.00 + 1.00 + 0.02 + 0.02 // = 2.04
+	if got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("ComputeCost = %v, want %v", got, want)
+	}
+}
+
 // R-Y23Q-MNSU: provider is inferred from the bare API ID's prefix —
 // claude-* → Anthropic, gpt-* → OpenAI, gemini-* → Google. Pin the
 // three rules with values that aren't (and won't become) registry

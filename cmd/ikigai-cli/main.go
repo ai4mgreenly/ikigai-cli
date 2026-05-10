@@ -14,6 +14,7 @@ import (
 	"github.com/ai4mgreenly/ikigai-cli/internal/model"
 	"github.com/ai4mgreenly/ikigai-cli/internal/provider"
 	anthropicprovider "github.com/ai4mgreenly/ikigai-cli/internal/provider/anthropic"
+	openaiprovider "github.com/ai4mgreenly/ikigai-cli/internal/provider/openai"
 	"github.com/ai4mgreenly/ikigai-cli/internal/schema"
 	"github.com/ai4mgreenly/ikigai-cli/internal/startup"
 	"github.com/ai4mgreenly/ikigai-cli/internal/tools"
@@ -144,13 +145,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// R-YL2Y-7HXQ: missing provider credential is a fatal startup error.
-	switch resolved.Provider {
-	case model.ProviderAnthropic:
-		if err := startup.RequireAnthropicKey(); err != nil {
-			fmt.Fprintln(stderr, err.Error())
-			return 1
-		}
+	// R-YL2Y-7HXQ / R-857T-2AX4: missing provider credential is a fatal
+	// startup error; only the selected provider's key is checked.
+	if err := startup.RequireCredential(string(resolved.Provider)); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
 	}
 
 	_ = flags.dangerouslySkipPermissions
@@ -162,8 +161,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	apiKey := os.Getenv(startup.AnthropicKeyEnv)
-	client, err := anthropicprovider.New(apiKey, resolved.BareID)
+	// R-8SDW-BY0B: backend dispatch follows provider selection, one-to-one.
+	client, apiKey, err := buildClient(resolved)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 1
@@ -173,7 +172,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var tr *trace.Tracer
 	if flags.raw {
 		tr = trace.New(stdout, apiKey)
-		client.SetTracer(tr)
+		if ts, ok := client.(interface{ SetTracer(*trace.Tracer) }); ok {
+			ts.SetTracer(tr)
+		}
 	}
 
 	// R-7GAW-CQ00: wire stdin -> agent -> stdout.
@@ -182,6 +183,31 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// R-8SDW-BY0B: buildClient constructs the provider backend determined by
+// resolved.Provider and reads the matching API key from the environment.
+// Returns the client, the raw API key (used by the tracer to redact it
+// from trace output), and any construction error.
+func buildClient(resolved model.Resolved) (provider.Client, string, error) {
+	switch resolved.Provider {
+	case model.ProviderAnthropic:
+		apiKey := os.Getenv(startup.AnthropicKeyEnv)
+		c, err := anthropicprovider.New(apiKey, resolved.BareID)
+		if err != nil {
+			return nil, "", err
+		}
+		return c, apiKey, nil
+	case model.ProviderOpenAI:
+		apiKey := os.Getenv(startup.OpenAIKeyEnv)
+		c, err := openaiprovider.New(apiKey, resolved.BareID)
+		if err != nil {
+			return nil, "", err
+		}
+		return c, apiKey, nil
+	default:
+		return nil, "", fmt.Errorf("unsupported provider %q", resolved.Provider)
+	}
 }
 
 func main() {

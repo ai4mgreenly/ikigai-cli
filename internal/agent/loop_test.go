@@ -426,6 +426,102 @@ func TestR_8293_8LCI_ToolRoundTripDispatchesToolsAndContinues(t *testing.T) {
 	}
 }
 
+// R-YSX3-4AE9: each backend populates the result event's usage,
+// total_cost_usd, num_turns, duration_ms, and modelUsage fields.
+// This test verifies the full data path: a provider emits EventUsage,
+// the agent loop accumulates it, and the result event carries correct values.
+func TestR_YSX3_4AE9_BackendUsagePopulatesResultEvent(t *testing.T) {
+	client := &fakeClient{events: []provider.Event{
+		provider.EventTextDelta{Text: `{"status":"CONTINUE"}`},
+		// R-YSX3-4AE9: the backend emits EventUsage before EventDone.
+		provider.EventUsage{InputTokens: 100, OutputTokens: 50},
+		provider.EventDone{StopReason: "end_turn"},
+	}}
+
+	const ralphSchema = `{
+		"type": "object",
+		"properties": {
+			"status": {"type": "string", "enum": ["DONE", "CONTINUE"]}
+		},
+		"required": ["status"],
+		"additionalProperties": false
+	}`
+	sch, err := schema.Parse([]byte(ralphSchema))
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+
+	var out bytes.Buffer
+	sess := wire.NewSession(&out)
+	req := provider.Request{Model: "claude-haiku-4-5"}
+	if err := Run(context.Background(), client, sess, req, sch, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	lines := splitLines(out.String())
+	if len(lines) < 2 {
+		t.Fatalf("expected at least 2 events (assistant + result), got %d", len(lines))
+	}
+	resultLine := lines[len(lines)-1]
+
+	var result struct {
+		Type         string `json:"type"`
+		IsError      bool   `json:"is_error"`
+		NumTurns     int    `json:"num_turns"`
+		DurationMs   int64  `json:"duration_ms"`
+		TotalCostUSD float64 `json:"total_cost_usd"`
+		Usage        *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+		ModelUsage map[string]struct {
+			InputTokens  int     `json:"inputTokens"`
+			OutputTokens int     `json:"outputTokens"`
+			CostUSD      float64 `json:"costUSD"`
+		} `json:"modelUsage"`
+	}
+	if err := json.Unmarshal([]byte(resultLine), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Type != "result" {
+		t.Fatalf("type = %q, want result", result.Type)
+	}
+	if result.IsError {
+		t.Fatalf("is_error = true, unexpected")
+	}
+	if result.NumTurns != 1 {
+		t.Errorf("num_turns = %d, want 1", result.NumTurns)
+	}
+	if result.DurationMs < 0 {
+		t.Errorf("duration_ms = %d, want >= 0", result.DurationMs)
+	}
+	if result.Usage == nil {
+		t.Fatal("usage must be present when tokens were consumed")
+	}
+	if result.Usage.InputTokens != 100 {
+		t.Errorf("usage.input_tokens = %d, want 100", result.Usage.InputTokens)
+	}
+	if result.Usage.OutputTokens != 50 {
+		t.Errorf("usage.output_tokens = %d, want 50", result.Usage.OutputTokens)
+	}
+	if result.TotalCostUSD <= 0 {
+		t.Errorf("total_cost_usd = %v, want > 0 (computed from pricing registry)", result.TotalCostUSD)
+	}
+	mu, ok := result.ModelUsage["claude-haiku-4-5"]
+	if !ok {
+		t.Fatal("modelUsage[claude-haiku-4-5] must be present")
+	}
+	if mu.InputTokens != 100 {
+		t.Errorf("modelUsage inputTokens = %d, want 100", mu.InputTokens)
+	}
+	if mu.OutputTokens != 50 {
+		t.Errorf("modelUsage outputTokens = %d, want 50", mu.OutputTokens)
+	}
+	if mu.CostUSD <= 0 {
+		t.Errorf("modelUsage costUSD = %v, want > 0", mu.CostUSD)
+	}
+}
+
 func splitLines(s string) []string {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {

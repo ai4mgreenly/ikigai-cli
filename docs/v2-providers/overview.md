@@ -1,84 +1,21 @@
-# v2 Providers — Design Context (Not MVP)
+# Google Gemini — Design Context (Not v1)
 
-This document captures the OpenAI and Google Gemini provider design
-context that informs ikigai-cli's provider abstraction shape. **It
-is not part of the MVP spec.** The build agent does not implement
-these backends in v1; this material exists so the abstraction
-defined in `reqs/providers.md` (Anthropic + cross-cutting) can
-admit them as additive packages later.
+This document captures the Google Gemini provider design context
+that informs ikigai-cli's provider abstraction shape. **It is not
+part of the v1 spec.** The build agent does not implement the
+Gemini backend in v1; this material exists so the abstraction
+defined in `reqs/providers.md` can admit Gemini as an additive
+package later.
 
-When v2 work begins, the operator should mint fresh requirement
-IDs and place implementable claims under `reqs/`. The text below
-preserves the original requirement IDs purely as anchors for that
-future migration — they are **not** active requirements while this
-file lives outside `reqs/`.
+When Gemini work begins, the operator should mint fresh
+requirement IDs and place implementable claims under `reqs/`. The
+text below preserves the original requirement IDs purely as
+anchors for that future migration — they are **not** active
+requirements while this file lives outside `reqs/`.
 
-Implementation references for each provider live alongside this
-document:
-
-- `openai.md` — OpenAI Responses API wire-level reference
-- `google.md` — Google Generative Language API wire-level reference
-
-For the Anthropic v1 implementation reference, see
-`reqs/providers/anthropic.md`.
-
-## OpenAI — design context
-
-- R-5H5Q-EF6X: ikigai-cli's OpenAI backend talks to the OpenAI
-  Responses API over HTTPS with SSE for streaming. The Chat
-  Completions API is not used; codex-cli has deprecated it for
-  agentic workflows and the Responses API is the documented
-  forward path.
-
-- R-64BT-O2A4: authentication uses the `OPENAI_API_KEY` env var
-  as a bearer credential per OpenAI's documented header format.
-  No Azure / organization-routing / project-key surface in v1.
-
-- R-6P24-65VX: OpenAI backend supports the following models in
-  v1, with the listed reasoning-effort vocabulary:
-
-  | Model ID | Effort values | Notes |
-  |---|---|---|
-  | `gpt-5.5` | `none`, `low`, `medium`, `high`, `xhigh` | Default frontier; codex-cli default |
-  | `gpt-5.4` | `none`, `low`, `medium`, `high`, `xhigh` | Mainline frontier |
-  | `gpt-5.4-pro` | `medium`, `high`, `xhigh` | No low/none levels |
-  | `gpt-5.4-mini` | `none`, `low`, `medium`, `high`, `xhigh` | Cost/latency tier |
-  | `gpt-5.3-codex` | `low`, `medium`, `high`, `xhigh` | Coding specialist |
-  | `gpt-5.2` | `none`, `low`, `medium`, `high`, `xhigh` | Previous frontier; still GA |
-
-  No short aliases — codex-cli does not define any, and ikigai-cli
-  follows suit (per OVERVIEW R-XBYO-1ZI1).
-
-- R-79SE-O9HQ: `gpt-5.5-pro` is intentionally omitted from v1
-  despite being a current frontier model. Its multi-minute
-  request times and Responses-API-only nature are out of scope
-  for the bounded ralph-loops iteration model. Add later if a use
-  case emerges.
-
-- R-7VQL-K4U8: tool-use translation. OpenAI's Responses API
-  represents tool calls as `function_call` items in the streamed
-  output and tool results as `function_call_output` items in the
-  next request's input array. The OpenAI backend translates
-  these to/from Claude Code's `tool_use` / `tool_result` blocks
-  on the wire. Tool input arguments arrive as JSON-encoded
-  strings on OpenAI's side; ikigai-cli decodes them into the
-  JSON values that go into stream-json `tool_use.input`.
-
-- R-8GGW-28G1: reasoning output. OpenAI emits `reasoning` items
-  in the Responses API stream when reasoning models are used. By
-  default ikigai-cli does NOT forward these as `thinking` blocks
-  on stdout — the stream is internal to the model and not
-  intended for end-user exposure. (This matches codex-cli's
-  default behavior: reasoning summaries are surfaced in verbose
-  mode only.)
-
-- R-92F2-Y3SJ: structured-output enforcement for the iteration's
-  final `result.structured_output` uses OpenAI's native
-  Responses-API structured-output feature (response format with
-  JSON schema) when supported by the selected model. For models
-  that lack native structured outputs (e.g. `gpt-5.4-pro` per
-  current API docs), the OpenAI backend falls back to prompt-
-  level instruction plus local validation per R-WFWM-BKWX.
+The Gemini wire-level reference lives at `google.md`. For the
+Anthropic and OpenAI v1 implementation references, see
+`reqs/providers/anthropic.md` and `reqs/providers/openai.md`.
 
 ## Google Gemini — design context
 

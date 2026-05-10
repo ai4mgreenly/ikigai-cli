@@ -24,18 +24,17 @@ are explicitly not part of the target audience.
 
 ## MVP scope
 
-- R-S04B-QD3D: v1 implements Anthropic only. OpenAI and Google
-  Gemini are deliberately deferred to a later version. The
-  provider abstraction, model registry shape, effort vocabulary
-  (native pass-through), and tool-runtime / wire-format
-  separation must nonetheless be designed assuming all three
-  providers will eventually be supported — adding OpenAI or
-  Gemini in a later version must not require re-architecting the
-  agent loop, the wire-format codec, the tool runtime, or the
-  provider interface. The reference docs at `providers/openai.md`
-  and `providers/google.md` are kept in this directory as design
-  context (so the abstraction is shaped against real provider
-  differences), not as MVP build targets.
+- R-6MCB-UMJV: v1 implements Anthropic and OpenAI. Google Gemini
+  is deliberately deferred to a later version. The provider
+  abstraction, model registry shape, effort vocabulary (native
+  pass-through), and tool-runtime / wire-format separation must
+  nonetheless be designed assuming Gemini will eventually be
+  supported — adding Gemini in a later version must not require
+  re-architecting the agent loop, the wire-format codec, the
+  tool runtime, or the provider interface. The Gemini reference
+  doc at `docs/v2-providers/google.md` is kept as design context
+  (so the abstraction is shaped against real provider
+  differences), not as a v1 build target.
 
 ## Configuration model
 
@@ -186,14 +185,17 @@ are explicitly not part of the target audience.
 
 ## Provider model
 
-- R-WQ0H-645J: v1 supports three providers: Anthropic, OpenAI, and
-  Google Gemini. Adding a fourth provider must not require changes
-  to the wire-format translation layer or to existing tool
-  implementations.
+- R-78AI-QHWD: the supported-provider set is intentionally bounded
+  but extensible. v1 supports Anthropic and OpenAI; Gemini is the
+  deferred third provider per R-6MCB-UMJV. Adding a fourth provider
+  (or unblocking Gemini) must not require changes to the wire-
+  format translation layer or to existing tool implementations —
+  the provider interface in `internal/provider` is the only seam
+  that grows.
 
 - R-XBYO-1ZI1: the `--model` flag always accepts the bare API model
   ID used by that provider's HTTP API (e.g. `claude-opus-4-7`,
-  `gpt-5.4`, `gemini-3-pro-preview`). Per-provider short aliases
+  `gpt-5.5`, `gemini-3-pro-preview`). Per-provider short aliases
   may also be accepted as sugar where the upstream first-party CLI
   defines them (Anthropic: `opus`/`sonnet`/`haiku` and bracketed
   variants like `opus[1m]`; Google: `pro`/`flash`/`flash-lite`/
@@ -215,6 +217,53 @@ are explicitly not part of the target audience.
   fourth provider must follow the same `<PROVIDER>_API_KEY`
   pattern. Missing credentials for the selected provider are a
   fatal startup error.
+
+- R-857T-2AX4: provider selection drives credential selection,
+  one-to-one. The provider chosen by `--model` prefix inference
+  per R-Y23Q-MNSU determines which single `<PROVIDER>_API_KEY`
+  env var ikigai-cli reads on startup; no other provider's key
+  is consulted, defaulted to, or fallen back upon. Concretely:
+  - `--model=gpt-*` reads `OPENAI_API_KEY`. `ANTHROPIC_API_KEY`
+    and `GOOGLE_API_KEY` are not read; their absence is not an
+    error and their presence does not satisfy the credential
+    requirement.
+  - `--model=claude-*` (or any Anthropic alias) reads
+    `ANTHROPIC_API_KEY` only.
+  - `--model=gemini-*` (when Gemini lands) reads
+    `GOOGLE_API_KEY` only.
+  The startup-error message produced under R-2247-BPXI for a
+  missing key MUST name the variable that the selected provider
+  actually requires — never a different provider's variable.
+  Reporting `ANTHROPIC_API_KEY is required` while
+  `--model=gpt-5.5` was supplied is a violation of this
+  requirement, not of R-YL2Y-7HXQ. This requirement exists to
+  forbid the failure mode where a hard-coded default routes
+  every startup through one provider's credential check
+  regardless of `--model`.
+
+- R-8SDW-BY0B: backend dispatch follows provider selection,
+  one-to-one. The provider chosen by `--model` prefix inference
+  per R-Y23Q-MNSU determines which concrete backend package
+  implements the iteration's provider round-trips. ikigai-cli
+  MUST construct exactly the backend matching the resolved
+  provider; no always-on default backend is permitted. Cmd-layer
+  wiring may import every backend subpackage (it is the only
+  layer allowed to per R-BUFE-M5E0 / R-G0EH-D2SW), but the
+  selection between them is data-driven from
+  `resolved.Provider`, not hard-coded. Concretely:
+  - `--model=gpt-*` instantiates the OpenAI backend at
+    `internal/provider/openai`. The iteration's HTTP traffic
+    targets `api.openai.com` per R-WWTI-LSSO; no request to
+    `api.anthropic.com` is issued.
+  - `--model=claude-*` (or any Anthropic alias) instantiates
+    the Anthropic backend at `internal/provider/anthropic`.
+    No request to `api.openai.com` is issued.
+  - `--model=gemini-*` (when Gemini lands) instantiates the
+    Gemini backend, with the same isolation guarantee.
+  This requirement exists to forbid the failure mode where a
+  startup path that has been correctly credential-validated
+  for one provider nonetheless dispatches the iteration
+  through a different provider's backend.
 
 ## Tool runtime
 
@@ -268,18 +317,21 @@ are explicitly not part of the target audience.
     produces the `ikigai-cli` binary at a known path under the
     repo (typical: `./bin/ikigai-cli`).
   - `test`: runs the project's automated test suite and exits
-    non-zero on any failure. Tests that exercise the Anthropic
-    backend require a real `ANTHROPIC_API_KEY`; the `test` target
-    reads the key from `$HOME/.secrets/ANTHROPIC_API_KEY` (a
-    single-line file containing the bare key) and exports it
-    into the test environment. The key value MUST NOT be echoed,
-    logged, included in test output, embedded in error messages,
-    written to any file under the repo, or otherwise surfaced
-    where it could land in an agent's context, terminal scrollback,
-    CI log, or commit. If the key file is absent, `test` fails
-    with a clear message naming the missing file (not its content)
-    rather than running a partial suite or making a real request
-    with no auth.
+    non-zero on any failure. Tests that exercise a provider
+    backend require a real API key for that provider; the `test`
+    target reads each key from a single-line file under
+    `$HOME/.secrets/` and exports it into the test environment:
+    - Anthropic backend tests: `$HOME/.secrets/ANTHROPIC_API_KEY`
+    - OpenAI backend tests: `$HOME/.secrets/OPENAI_API_KEY`
+    Each key value MUST NOT be echoed, logged, included in test
+    output, embedded in error messages, written to any file under
+    the repo, or otherwise surfaced where it could land in an
+    agent's context, terminal scrollback, CI log, or commit. If
+    any required key file is absent, `test` fails with a clear
+    message naming the missing file (not its content) rather than
+    running a partial suite or making a real request with no
+    auth. The same redaction guarantees apply uniformly to all
+    provider keys.
   - `install`: places the built binary at `~/.local/bin/ikigai-cli`,
     creating the directory if it does not exist. Users are
     expected to have `~/.local/bin` on their `PATH`.
